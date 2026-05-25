@@ -1,0 +1,57 @@
+version: "3.9"
+
+services:
+  mongo:
+    image: mongo:7
+    container_name: orbro_mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: orbro_mediamtx
+    restart: unless-stopped
+    ports:
+      - "8554:8554"   # RTSP
+      - "8888:8888"   # HLS/HTTP (optional)
+      - "8889:8889"   # WebRTC (optional)
+    environment:
+      - MTX_PROTOCOLS=tcp
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: orbro_backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - MONGO_URI=mongodb://mongo:27017
+    volumes:
+      - ./video:/app/video:ro
+      - ./scripts:/app/scripts:ro
+    depends_on:
+      mongo:
+        condition: service_healthy
+      mediamtx:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/cameras"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  mongo_data:
+    driver: local

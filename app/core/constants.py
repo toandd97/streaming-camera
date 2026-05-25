@@ -1,0 +1,38 @@
+from enum import Enum
+
+
+class CameraStatus(str, Enum):
+    CREATED = "CREATED"
+    CONNECTING = "CONNECTING"
+    CONNECTED = "CONNECTED"
+    DISCONNECTED = "DISCONNECTED"
+    RECONNECTING = "RECONNECTING"
+    STOPPED = "STOPPED"
+    ERROR = "ERROR"
+
+
+class EventType(str, Enum):
+    CAMERA_CONNECTED = "CAMERA_CONNECTED"
+    CAMERA_DISCONNECTED = "CAMERA_DISCONNECTED"
+    CAMERA_RECONNECTING = "CAMERA_RECONNECTING"
+    CAMERA_RECONNECTED = "CAMERA_RECONNECTED"
+    LOW_FPS = "LOW_FPS"
+    HIGH_LATENCY = "HIGH_LATENCY"
+    HIGH_CPU = "HIGH_CPU"
+    HIGH_MEMORY = "HIGH_MEMORY"
+    WORKER_ERROR = "WORKER_ERROR"
+
+
+class Severity(str, Enum):
+    INFO = "INFO"
+    WARNING = "WARNING"
+    CRITICAL = "CRITICAL"
+
+
+# Allowed display FPS values
+ALLOWED_DISPLAY_FPS = [1, 3, 5, 10, 15]
+
+# WebSocket message types
+WS_CAMERA_STATUS_SNAPSHOT = "camera_status_snapshot"
+WS_SYSTEM_METRICS = "system_metrics"
+WS_STREAM_EVENT = "stream_event"

@@ -1,0 +1,1207 @@
+B1 CAMERA MANAGEMENT & STREAMING VIDEO SYSTEM - REQUIREMENTS
+============================================================
+
+Project: ORBRO Vina Backend Developer Test - B1
+Stack: FastAPI + MongoDB + MediaMTX + FFmpeg + OpenCV + MJPEG Web UI
+API Version: /api/v1
+Main Goal: Build a reproducible camera management and video streaming monitoring system.
+
+
+1. OBJECTIVE
+------------
+Build a backend and web dashboard system that can:
+
+- Simulate multiple RTSP cameras locally from a provided video file.
+- Register RTSP cameras through API.
+- Read camera streams from registered RTSP URLs.
+- Display at least 4 video streams on a web grid.
+- Manage camera configuration through CRUD APIs.
+- Track runtime status for each camera.
+- Detect stream failure when no frame is received for a configured timeout.
+- Automatically reconnect to failed streams.
+- Display FPS, latency/frame age, uptime, reconnect count per camera.
+- Display CPU, Memory, and GPU information if available.
+- Store camera configuration and stream events in MongoDB.
+- Optionally send alerts, for example Telegram notification, when camera failures or resource issues occur.
+
+Important:
+- The system must be reproducible by the evaluator using README instructions.
+- No physical camera is required.
+- Multiple cameras can be simulated by publishing the same video file to different RTSP paths.
+- Telegram alert is optional and must not be required for the system to run.
+
+
+2. HIGH-LEVEL ARCHITECTURE
+--------------------------
+
+Video file provided by company
+    -> FFmpeg loops video file
+    -> MediaMTX publishes RTSP streams
+    -> FastAPI Camera Registry receives RTSP camera registration
+    -> MongoDB stores camera configuration
+    -> StreamManager starts one StreamWorker per camera
+    -> StreamWorker reads RTSP frames using OpenCV or FFmpeg
+    -> StreamWorker updates runtime status in memory
+    -> MJPEG endpoint serves latest frames to browser
+    -> Web UI displays camera grid
+    -> MetricsService collects CPU/RAM/GPU metrics
+    -> AlertService stores stream events and optionally sends Telegram alerts
+
+Core principle:
+- MongoDB stores persistent data: camera config and important events.
+- Runtime status is stored in memory by StreamManager/StreamWorker.
+- Frontend should not call each camera status endpoint separately.
+- Frontend should call one batched status API or receive updates via WebSocket/SSE.
+
+
+3. TECHNOLOGY STACK
+-------------------
+
+Backend:
+- Python 3.11+
+- FastAPI
+- Uvicorn
+- Pydantic
+- Motor or PyMongo for MongoDB
+- OpenCV for reading RTSP streams
+- psutil for CPU/RAM metrics
+- pynvml optional for NVIDIA GPU metrics
+
+Database:
+- MongoDB
+
+RTSP Simulation:
+- MediaMTX as local RTSP server
+- FFmpeg to loop video file and publish RTSP streams
+
+Web UI:
+- Simple React UI or simple HTML/JavaScript served by backend
+- Video display through MJPEG endpoints
+- Dashboard status through batched REST polling, SSE, or WebSocket
+
+Deployment:
+- Dockerfile for backend
+- docker-compose.yml for backend, MongoDB, MediaMTX
+- Script to start RTSP simulated streams
+
+
+4. API VERSIONING
+-----------------
+
+All APIs must be versioned under:
+
+/api/v1
+
+Examples:
+- POST   /api/v1/cameras
+- GET    /api/v1/cameras
+- GET    /api/v1/cameras/{camera_id}
+- PUT    /api/v1/cameras/{camera_id}
+- DELETE /api/v1/cameras/{camera_id}
+- GET    /api/v1/cameras/{camera_id}/status
+- PATCH  /api/v1/cameras/{camera_id}/display-fps
+- GET    /api/v1/streams/{camera_id}/mjpeg
+- GET    /api/v1/system/metrics
+- GET    /api/v1/stream-events
+- WS     /api/v1/ws/dashboard optional
+
+Reason for versioning:
+- Makes the API easier to evolve.
+- Allows future /api/v2 without breaking clients.
+- Shows backend design maturity.
+
+
+5. RECOMMENDED PROJECT STRUCTURE
+--------------------------------
+
+camera-monitoring-system/
+├── app/
+│   ├── __init__.py
+│   ├── main.py
+│   ├── core/
+│   │   ├── __init__.py
+│   │   ├── config.py
+│   │   ├── logging.py
+│   │   └── constants.py
+│   ├── api/
+│   │   ├── __init__.py
+│   │   └── v1/
+│   │       ├── __init__.py
+│   │       ├── router.py
+│   │       ├── camera_routes.py
+│   │       ├── stream_routes.py
+│   │       ├── metrics_routes.py
+│   │       ├── event_routes.py
+│   │       └── websocket_routes.py
+│   ├── db/
+│   │   ├── __init__.py
+│   │   ├── mongodb.py
+│   │   └── indexes.py
+│   ├── models/
+│   │   ├── __init__.py
+│   │   ├── camera_model.py
+│   │   ├── stream_event_model.py
+│   │   └── runtime_status_model.py
+│   ├── schemas/
+│   │   ├── __init__.py
+│   │   ├── camera_schema.py
+│   │   ├── stream_event_schema.py
+│   │   ├── metrics_schema.py
+│   │   └── websocket_schema.py
+│   ├── repositories/
+│   │   ├── __init__.py
+│   │   ├── camera_repository.py
+│   │   └── stream_event_repository.py
+│   ├── services/
+│   │   ├── __init__.py
+│   │   ├── camera_service.py
+│   │   ├── stream_manager.py
+│   │   ├── stream_worker.py
+│   │   ├── metrics_service.py
+│   │   ├── alert_service.py
+│   │   ├── telegram_notifier.py
+│   │   └── websocket_manager.py
+│   ├── utils/
+│   │   ├── __init__.py
+│   │   ├── time_utils.py
+│   │   ├── fps_calculator.py
+│   │   └── image_utils.py
+│   └── web/
+│       ├── index.html
+│       ├── app.js
+│       └── styles.css
+├── scripts/
+│   ├── start_rtsp_streams.sh
+│   ├── stop_rtsp_streams.sh
+│   ├── register_demo_cameras.sh
+│   └── benchmark_streams.sh
+├── videos/
+│   └── sample.mp4
+├── docs/
+│   ├── architecture.md
+│   ├── api_examples.md
+│   ├── measurement_result.md
+│   ├── ai_usage_log.md
+│   ├── ai_retrospective.md
+│   ├── references.md
+│   ├── screenshots/
+│   └── logs/
+├── tests/
+│   ├── test_camera_api.py
+│   ├── test_stream_status.py
+│   └── test_metrics.py
+├── .env.example
+├── requirements.txt
+├── Dockerfile
+├── docker-compose.yml
+└── README.md
+
+
+6. RESPONSIBILITY OF MAIN MODULES
+---------------------------------
+
+app/main.py
+- Create FastAPI app.
+- Include /api/v1 router.
+- Register startup/shutdown lifecycle.
+- Start StreamManager after MongoDB connection is ready.
+- Serve web UI if using static HTML.
+
+app/core/config.py
+- Load environment variables.
+- Define system settings such as MongoDB URL, timeout, FPS, alert thresholds.
+
+app/db/mongodb.py
+- Create MongoDB client.
+- Expose database instance.
+- Close connection on shutdown.
+
+app/db/indexes.py
+- Create indexes for cameras and stream_events collections.
+
+app/api/v1/router.py
+- Combine all v1 route modules.
+
+camera_routes.py
+- CRUD camera APIs.
+- Calls CameraService.
+
+stream_routes.py
+- MJPEG streaming endpoint.
+- Gets latest frame from StreamManager.
+
+metrics_routes.py
+- System metrics endpoint.
+
+websocket_routes.py
+- Optional WebSocket dashboard endpoint.
+
+camera_repository.py
+- Direct MongoDB access for camera collection.
+
+stream_event_repository.py
+- Direct MongoDB access for stream event collection.
+
+camera_service.py
+- Business logic for camera create/read/update/delete.
+- Coordinates MongoDB and StreamManager.
+
+stream_manager.py
+- Runtime manager for all StreamWorkers.
+- Keeps dictionary: camera_id -> StreamWorker.
+- Starts workers for enabled cameras.
+- Stops workers when camera is deleted/disabled.
+- Restarts worker when RTSP URL changes.
+- Aggregates runtime status from all workers.
+
+stream_worker.py
+- One worker per camera.
+- Opens RTSP connection.
+- Reads frames continuously.
+- Stores latest frame in memory.
+- Calculates actual FPS.
+- Calculates latency or frame age.
+- Detects no-frame timeout.
+- Updates status: CONNECTING, CONNECTED, DISCONNECTED, RECONNECTING, STOPPED, ERROR.
+- Performs auto-reconnect.
+- Emits events to AlertService when needed.
+
+metrics_service.py
+- Collects CPU and memory by psutil.
+- Collects GPU metrics if available.
+- Returns gpu_available=false if no GPU.
+
+alert_service.py
+- Receives stream/system events.
+- Saves important events to MongoDB.
+- Applies alert cooldown.
+- Calls TelegramNotifier if enabled.
+- Optionally pushes event through WebSocketManager.
+
+telegram_notifier.py
+- Sends Telegram message only when TELEGRAM_ENABLED=true.
+- Must fail safely without breaking core system.
+
+websocket_manager.py
+- Optional.
+- Manages connected dashboard clients.
+- Broadcasts camera status, system metrics, and stream events.
+
+
+7. MONGODB COLLECTIONS
+----------------------
+
+7.1 cameras collection
+
+Purpose:
+- Store persistent camera configuration.
+
+Example document:
+
+{
+  "_id": ObjectId("..."),
+  "name": "Camera 1",
+  "rtsp_url": "rtsp://mediamtx:8554/cam1",
+  "resolution": "640x360",
+  "target_fps": 10,
+  "display_fps": 5,
+  "enabled": true,
+  "description": "Demo camera 1",
+  "created_at": ISODate("2026-05-22T10:00:00Z"),
+  "updated_at": ISODate("2026-05-22T10:00:00Z")
+}
+
+Recommended indexes:
+- name
+- enabled
+- created_at
+
+Notes:
+- Runtime status should not be updated into this collection every second.
+- Runtime status should be held in memory and merged into API responses.
+
+
+7.2 stream_events collection
+
+Purpose:
+- Store important events such as disconnection, reconnection, low FPS, high CPU, high memory.
+
+Example document:
+
+{
+  "_id": ObjectId("..."),
+  "camera_id": "665f...",
+  "event_type": "CAMERA_DISCONNECTED",
+  "severity": "CRITICAL",
+  "message": "No frame received for 5 seconds",
+  "metric_name": "no_frame_duration_seconds",
+  "metric_value": 5.2,
+  "threshold": 5,
+  "notified": true,
+  "created_at": ISODate("2026-05-22T10:10:00Z")
+}
+
+Event types:
+- CAMERA_CONNECTED
+- CAMERA_DISCONNECTED
+- CAMERA_RECONNECTING
+- CAMERA_RECONNECTED
+- LOW_FPS
+- HIGH_LATENCY
+- HIGH_CPU
+- HIGH_MEMORY
+- WORKER_ERROR
+
+Severity values:
+- INFO
+- WARNING
+- CRITICAL
+
+Recommended indexes:
+- camera_id
+- event_type
+- severity
+- created_at
+
+
+7.3 Optional: system_metrics_snapshots collection
+
+Purpose:
+- Optional only.
+- Store periodic metrics for historical analysis.
+
+For this assignment, this is not required.
+Prefer showing current metrics from memory/API to keep the project simple.
+
+
+8. RUNTIME STATUS MODEL
+-----------------------
+
+Runtime status is not stored in MongoDB every second.
+It is held inside StreamWorker or StreamManager.
+
+Runtime fields:
+
+{
+  "camera_id": "...",
+  "status": "CONNECTED",
+  "actual_fps": 9.8,
+  "display_fps": 5,
+  "latency_ms": 120,
+  "frame_age_ms": 80,
+  "uptime_seconds": 3600,
+  "reconnect_count": 2,
+  "last_frame_at": "2026-05-22T10:20:00Z",
+  "last_connected_at": "2026-05-22T10:00:00Z",
+  "last_disconnected_at": null,
+  "last_error": null
+}
+
+Status values:
+- CREATED
+- CONNECTING
+- CONNECTED
+- DISCONNECTED
+- RECONNECTING
+- STOPPED
+- ERROR
+
+
+9. API REQUIREMENTS
+-------------------
+
+9.1 Create camera
+
+POST /api/v1/cameras
+
+Request:
+{
+  "name": "Camera 1",
+  "rtsp_url": "rtsp://mediamtx:8554/cam1",
+  "resolution": "640x360",
+  "target_fps": 10,
+  "display_fps": 5,
+  "enabled": true
+}
+
+Processing:
+1. Validate request.
+2. Save camera config to MongoDB.
+3. Create runtime status.
+4. Ask StreamManager to start StreamWorker if enabled=true.
+5. Return created camera.
+
+Response:
+{
+  "id": "...",
+  "name": "Camera 1",
+  "rtsp_url": "rtsp://mediamtx:8554/cam1",
+  "resolution": "640x360",
+  "target_fps": 10,
+  "display_fps": 5,
+  "enabled": true,
+  "status": "CONNECTING"
+}
+
+
+9.2 List cameras
+
+GET /api/v1/cameras
+
+Processing:
+1. Load camera configs from MongoDB.
+2. Load runtime statuses from StreamManager.
+3. Merge config + runtime.
+4. Return list.
+
+Response:
+[
+  {
+    "id": "...",
+    "name": "Camera 1",
+    "rtsp_url": "rtsp://mediamtx:8554/cam1",
+    "resolution": "640x360",
+    "target_fps": 10,
+    "display_fps": 5,
+    "enabled": true,
+    "status": "CONNECTED",
+    "actual_fps": 9.8,
+    "latency_ms": 120,
+    "uptime_seconds": 3600,
+    "reconnect_count": 0,
+    "last_error": null
+  }
+]
+
+Important:
+- This endpoint is a batch status endpoint.
+- The frontend should call this once every 2 seconds if WebSocket is not used.
+- Do not call each camera status endpoint separately for dashboard refresh.
+
+
+9.3 Get camera detail
+
+GET /api/v1/cameras/{camera_id}
+
+Returns one camera config + runtime status.
+
+
+9.4 Update camera
+
+PUT /api/v1/cameras/{camera_id}
+
+Request example:
+{
+  "name": "Entrance Camera",
+  "rtsp_url": "rtsp://mediamtx:8554/cam1",
+  "resolution": "640x360",
+  "target_fps": 10,
+  "display_fps": 5,
+  "enabled": true
+}
+
+Processing:
+1. Load existing camera.
+2. Update MongoDB.
+3. If only name/display_fps changed:
+   - Update runtime config without restarting RTSP connection.
+4. If rtsp_url changed:
+   - Stop old worker.
+   - Start new worker using new RTSP URL.
+5. Return updated camera.
+
+
+9.5 Delete camera
+
+DELETE /api/v1/cameras/{camera_id}
+
+Processing:
+1. Stop StreamWorker.
+2. Remove runtime status from StreamManager.
+3. Delete or disable camera in MongoDB.
+4. Return success.
+
+Recommended:
+- Soft delete/disable is safer than physical delete.
+- For assignment, physical delete is acceptable if simpler.
+
+
+9.6 Get camera status
+
+GET /api/v1/cameras/{camera_id}/status
+
+Returns runtime status of one camera.
+
+Note:
+- Useful for debugging.
+- Dashboard should prefer batch endpoint GET /api/v1/cameras.
+
+
+9.7 Update display FPS
+
+PATCH /api/v1/cameras/{camera_id}/display-fps
+
+Request:
+{
+  "display_fps": 5
+}
+
+Processing:
+1. Validate display_fps, for example allow 1, 3, 5, 10, 15.
+2. Update MongoDB camera config.
+3. Update StreamWorker runtime display_fps.
+4. MJPEG generator uses new display_fps immediately.
+
+
+9.8 MJPEG stream endpoint
+
+GET /api/v1/streams/{camera_id}/mjpeg
+
+Purpose:
+- Browser displays video through img tag.
+
+Processing:
+1. Find StreamWorker by camera_id.
+2. Get latest frame from worker.
+3. Encode frame to JPEG.
+4. Yield multipart/x-mixed-replace response.
+5. Sleep according to display_fps.
+
+Important:
+- Do not transmit video frames through WebSocket in MVP.
+- WebSocket, if used, should be for status/metrics/events only.
+
+
+9.9 System metrics
+
+GET /api/v1/system/metrics
+
+Response:
+{
+  "cpu_percent": 42.5,
+  "memory_percent": 61.2,
+  "memory_used_mb": 8200,
+  "gpu_available": false,
+  "gpu_percent": null,
+  "gpu_memory_used_mb": null,
+  "active_streams": 4
+}
+
+
+9.10 Stream events
+
+GET /api/v1/stream-events
+
+Query params optional:
+- camera_id
+- event_type
+- severity
+- limit
+
+Returns recent stream events from MongoDB.
+
+
+9.11 Optional WebSocket dashboard
+
+WS /api/v1/ws/dashboard
+
+Purpose:
+- Push near real-time camera status, metrics, and stream events to UI.
+
+Message types from backend:
+- camera_status_snapshot
+- system_metrics
+- stream_event
+- command_ack optional
+
+Recommended frequency:
+- camera_status_snapshot every 1 second
+- system_metrics every 2-5 seconds
+- stream_event immediately when event occurs
+
+Important:
+- Do not send one message per frame.
+- Do not send video frames over WebSocket in MVP.
+
+
+10. LOGIC FLOWS
+---------------
+
+10.1 RTSP camera simulation flow
+
+1. Start docker compose.
+2. MongoDB starts.
+3. MediaMTX starts.
+4. Backend starts.
+5. Run FFmpeg script to publish video file as multiple RTSP streams.
+6. Example RTSP paths:
+   - rtsp://mediamtx:8554/cam1
+   - rtsp://mediamtx:8554/cam2
+   - rtsp://mediamtx:8554/cam3
+   - rtsp://mediamtx:8554/cam4
+7. Register these RTSP URLs through POST /api/v1/cameras.
+
+
+10.2 Register camera flow
+
+1. User calls POST /api/v1/cameras.
+2. FastAPI validates request body.
+3. CameraService calls CameraRepository to save config to MongoDB.
+4. CameraService calls StreamManager.start_camera(camera).
+5. StreamManager creates StreamWorker.
+6. StreamWorker status becomes CONNECTING.
+7. StreamWorker opens RTSP connection.
+8. If connection succeeds:
+   - status = CONNECTED
+   - last_connected_at = now
+   - uptime starts
+9. If connection fails:
+   - status = RECONNECTING
+   - reconnect_count += 1
+   - retry after configured interval
+10. API returns camera information.
+
+
+10.3 Stream reading flow
+
+1. StreamWorker opens RTSP URL.
+2. Worker continuously reads frames.
+3. If frame is received:
+   - Save latest_frame in memory.
+   - Update last_frame_at.
+   - Calculate actual_fps.
+   - Calculate frame_age_ms or processing latency.
+   - Set status to CONNECTED.
+4. If frame is not received:
+   - Check now - last_frame_at.
+   - If timeout is exceeded:
+     - Set status to DISCONNECTED.
+     - Create CAMERA_DISCONNECTED event.
+     - Notify AlertService.
+     - Release old capture.
+     - Switch to RECONNECTING.
+     - Retry connection.
+
+
+10.4 MJPEG display flow
+
+1. Browser opens /api/v1/streams/{camera_id}/mjpeg.
+2. Backend finds worker for camera_id.
+3. Backend reads latest_frame from worker memory.
+4. Backend encodes frame to JPEG.
+5. Backend yields multipart MJPEG response.
+6. Browser displays video using img tag.
+7. Backend sleeps based on display_fps before sending next frame.
+
+
+10.5 Camera status dashboard flow without WebSocket
+
+1. Frontend loads dashboard.
+2. Frontend calls GET /api/v1/cameras every 2 seconds.
+3. Backend returns all camera configs merged with runtime status.
+4. Frontend updates camera grid status.
+5. Frontend calls GET /api/v1/system/metrics every 2 seconds.
+6. Frontend updates CPU/RAM/GPU panel.
+
+Important:
+- This is batched polling.
+- Do not poll each camera individually.
+
+
+10.6 Camera status dashboard flow with WebSocket optional
+
+1. Frontend opens WebSocket /api/v1/ws/dashboard.
+2. Backend accepts connection.
+3. Background broadcaster sends camera_status_snapshot every 1 second.
+4. Background broadcaster sends system_metrics every 2-5 seconds.
+5. AlertService sends stream_event immediately when camera disconnects/reconnects.
+6. Frontend updates UI based on message type.
+7. Frontend auto-reconnects WebSocket if disconnected.
+
+
+10.7 Disconnection and auto-reconnect flow
+
+1. StreamWorker is reading frames normally.
+2. FFmpeg stream stops or RTSP connection breaks.
+3. Worker fails to receive frames.
+4. If no frame is received for NO_FRAME_TIMEOUT_SECONDS, for example 5 seconds:
+   - status = DISCONNECTED
+   - reconnect_count += 1
+   - last_error = "No frame received for 5 seconds"
+   - create CAMERA_DISCONNECTED event
+   - optional Telegram alert
+5. Worker releases current capture.
+6. Worker sets status = RECONNECTING.
+7. Worker sleeps RECONNECT_INTERVAL_SECONDS, for example 3 seconds.
+8. Worker tries to open RTSP URL again.
+9. If reconnect succeeds:
+   - status = CONNECTED
+   - last_connected_at = now
+   - create CAMERA_RECONNECTED event
+   - optional recovery alert
+10. If reconnect fails:
+   - stay RECONNECTING
+   - retry again later.
+
+
+10.8 Update display FPS flow
+
+1. User changes FPS on one camera tile in UI.
+2. Frontend calls PATCH /api/v1/cameras/{camera_id}/display-fps.
+3. Backend validates display_fps.
+4. Backend updates MongoDB camera config.
+5. Backend updates StreamWorker display_fps in memory.
+6. MJPEG endpoint immediately uses new display_fps.
+7. Camera stream connection does not need to restart.
+
+
+10.9 Update RTSP URL flow
+
+1. User calls PUT /api/v1/cameras/{camera_id} with new rtsp_url.
+2. Backend updates camera config in MongoDB.
+3. StreamManager stops old worker.
+4. StreamManager starts new worker with new RTSP URL.
+5. Status changes to CONNECTING.
+6. If connection works, status becomes CONNECTED.
+7. If connection fails, status becomes RECONNECTING.
+
+
+10.10 Delete camera flow
+
+1. User calls DELETE /api/v1/cameras/{camera_id}.
+2. CameraService asks StreamManager to stop the worker.
+3. Worker status becomes STOPPED.
+4. Worker releases RTSP capture.
+5. StreamManager removes worker from memory.
+6. CameraRepository deletes or disables camera config in MongoDB.
+7. UI no longer displays camera.
+
+
+10.11 Backend restart flow
+
+1. Backend starts.
+2. MongoDB connection is initialized.
+3. StreamManager loads all enabled cameras from MongoDB.
+4. For each enabled camera:
+   - Create StreamWorker.
+   - Start RTSP connection.
+5. Dashboard can show cameras again after restart.
+
+This is important because camera configs are persistent in MongoDB, but runtime workers are in memory and must be recreated.
+
+
+10.12 High CPU or high memory alert flow
+
+1. MetricsService samples CPU/RAM every few seconds.
+2. If CPU > threshold continuously for configured duration:
+   - create HIGH_CPU event
+   - save event in MongoDB
+   - optional Telegram alert
+3. If Memory > threshold continuously for configured duration:
+   - create HIGH_MEMORY event
+   - save event in MongoDB
+   - optional Telegram alert
+4. AlertService applies cooldown to avoid spam.
+
+
+11. CONFIGURATION REQUIREMENTS
+------------------------------
+
+.env.example:
+
+APP_NAME=Camera Monitoring System
+APP_ENV=local
+API_PREFIX=/api/v1
+
+MONGO_URI=mongodb://mongo:27017
+MONGO_DB_NAME=camera_monitoring
+
+NO_FRAME_TIMEOUT_SECONDS=5
+RECONNECT_INTERVAL_SECONDS=3
+DEFAULT_TARGET_FPS=10
+DEFAULT_DISPLAY_FPS=5
+MAX_DISPLAY_FPS=15
+
+LOW_FPS_RATIO=0.5
+LOW_FPS_DURATION_SECONDS=10
+CPU_ALERT_THRESHOLD=90
+MEMORY_ALERT_THRESHOLD=85
+RESOURCE_ALERT_DURATION_SECONDS=30
+ALERT_COOLDOWN_SECONDS=60
+
+TELEGRAM_ENABLED=false
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+
+MJPEG_JPEG_QUALITY=80
+
+
+12. DOCKER COMPOSE REQUIREMENTS
+-------------------------------
+
+Required services:
+
+1. mongo
+- image: mongo
+- expose port 27017 for local debug if needed
+- volume for MongoDB data
+
+2. mediamtx
+- image: bluenviron/mediamtx
+- expose port 8554
+
+3. backend
+- FastAPI app
+- depends_on mongo and mediamtx
+- expose port 8000
+- mount videos and scripts if needed
+
+Optional:
+4. frontend
+- if React is separated from backend
+
+Example services:
+- mongo
+- mediamtx
+- backend
+
+
+13. SCRIPT REQUIREMENTS
+-----------------------
+
+scripts/start_rtsp_streams.sh
+
+Purpose:
+- Start N RTSP streams from one video file.
+
+Example behavior:
+
+bash scripts/start_rtsp_streams.sh videos/sample.mp4 4
+
+Expected output:
+- rtsp://localhost:8554/cam1
+- rtsp://localhost:8554/cam2
+- rtsp://localhost:8554/cam3
+- rtsp://localhost:8554/cam4
+
+If backend runs inside Docker network, camera registration should use:
+- rtsp://mediamtx:8554/cam1
+
+If backend runs on host machine, camera registration should use:
+- rtsp://localhost:8554/cam1
+
+scripts/register_demo_cameras.sh
+
+Purpose:
+- Call POST /api/v1/cameras 4 times to register demo cameras.
+
+scripts/stop_rtsp_streams.sh
+
+Purpose:
+- Stop FFmpeg processes for testing reconnect.
+
+
+14. FRONTEND REQUIREMENTS
+-------------------------
+
+Dashboard must show:
+- At least 4 video streams in grid layout.
+- Camera name.
+- Status badge: CONNECTED, DISCONNECTED, RECONNECTING.
+- Actual FPS.
+- Display FPS.
+- Latency or frame age.
+- Uptime.
+- Reconnect count.
+- CPU usage.
+- Memory usage.
+- GPU if available.
+- Recent stream events.
+
+UI actions:
+- Register camera can be done by API only or simple UI form.
+- Change display FPS for each camera tile.
+- Optional: show alert toast when stream event occurs.
+
+Video display:
+- Use img tag with MJPEG source:
+  <img src="/api/v1/streams/{camera_id}/mjpeg" />
+
+Status update options:
+- MVP: Poll GET /api/v1/cameras every 2 seconds.
+- Bonus: WebSocket /api/v1/ws/dashboard.
+
+
+15. ALERT REQUIREMENTS
+----------------------
+
+Must-have:
+- Save important stream events to MongoDB.
+
+Good bonus:
+- Send Telegram alerts optionally.
+
+Alert conditions:
+- CAMERA_DISCONNECTED:
+  no frame received for more than 5 seconds.
+
+- CAMERA_RECONNECTED:
+  camera successfully receives frame again after reconnect.
+
+- LOW_FPS:
+  actual_fps < target_fps * LOW_FPS_RATIO for LOW_FPS_DURATION_SECONDS.
+
+- HIGH_CPU:
+  CPU > CPU_ALERT_THRESHOLD for RESOURCE_ALERT_DURATION_SECONDS.
+
+- HIGH_MEMORY:
+  Memory > MEMORY_ALERT_THRESHOLD for RESOURCE_ALERT_DURATION_SECONDS.
+
+Cooldown:
+- Same event_type for same camera should not send Telegram more than once in ALERT_COOLDOWN_SECONDS.
+
+Important:
+- Telegram should not be required for system reproduction.
+- If TELEGRAM_ENABLED=false, events are still saved to MongoDB and shown on UI.
+
+
+16. PERFORMANCE AND MEASUREMENT REQUIREMENTS
+--------------------------------------------
+
+Measure and report:
+- Number of concurrent streams tested.
+- Actual FPS per camera.
+- Display FPS per camera.
+- Latency or frame age per camera.
+- CPU usage.
+- Memory usage.
+- GPU usage if available.
+- Reconnect behavior.
+
+Minimum demo:
+- 4 concurrent RTSP streams.
+
+Scale explanation:
+- Architecture should support 32 registered channels.
+- If local machine cannot run 32 streams smoothly, report tested number honestly.
+- Explain bottleneck when scaling from 8 to 80 channels:
+  - CPU decoding
+  - memory buffer
+  - browser rendering
+  - network bandwidth
+  - RTSP connection management
+
+Important wording:
+- Performance results depend on local hardware.
+- Functional correctness should be reproducible by running README commands.
+
+
+17. PRODUCTION CONSIDERATIONS
+-----------------------------
+
+For production, consider:
+- WebRTC, HLS, or LL-HLS instead of MJPEG for efficient video delivery.
+- Prometheus + Grafana for metrics.
+- Alertmanager, Slack, Telegram, Email, PagerDuty, or Opsgenie for alerts.
+- Centralized logging with Loki or ELK.
+- Redis or message broker if multiple backend instances need shared runtime status.
+- Worker process pool or separate stream processing service.
+- Horizontal scaling.
+- Auth/JWT for REST API and WebSocket.
+- Role-based access control.
+- Better event retention policy.
+- Resource isolation per worker.
+
+Telegram in production:
+- Telegram can be one notification channel.
+- It should not be the only monitoring system.
+- Production should rely on standard observability stack.
+
+
+18. IMPLEMENTATION ORDER
+------------------------
+
+Step 1: Project setup
+- Create FastAPI project structure.
+- Add /api/v1 router.
+- Add MongoDB connection.
+- Add config from .env.
+
+Step 2: Docker compose
+- Add MongoDB service.
+- Add MediaMTX service.
+- Add backend service.
+
+Step 3: RTSP simulation
+- Write start_rtsp_streams.sh.
+- Confirm RTSP URLs are playable.
+
+Step 4: Camera CRUD
+- Implement POST /api/v1/cameras.
+- Implement GET /api/v1/cameras.
+- Implement PUT /api/v1/cameras/{id}.
+- Implement DELETE /api/v1/cameras/{id}.
+
+Step 5: StreamWorker
+- Implement reading RTSP for one camera.
+- Store latest frame.
+- Calculate actual FPS.
+- Return runtime status.
+
+Step 6: StreamManager
+- Start worker when camera is created.
+- Stop worker when camera is deleted.
+- Load enabled cameras on backend startup.
+
+Step 7: MJPEG endpoint
+- Implement GET /api/v1/streams/{id}/mjpeg.
+- Display one video in browser.
+
+Step 8: Web grid
+- Display 4 videos.
+- Show status, FPS, latency, uptime, reconnect count.
+
+Step 9: Failure detection and reconnect
+- Add no-frame timeout.
+- Add reconnect loop.
+- Add reconnect_count.
+- Add stream event creation.
+
+Step 10: Metrics
+- Add CPU/RAM endpoint.
+- Show metrics in UI.
+
+Step 11: Display FPS update
+- Add PATCH /api/v1/cameras/{id}/display-fps.
+- Apply immediately to MJPEG generator.
+
+Step 12: Alert optional
+- Add stream_events collection.
+- Add AlertService.
+- Add Telegram optional.
+
+Step 13: WebSocket optional
+- Add /api/v1/ws/dashboard if time allows.
+- Push status and events to UI.
+
+Step 14: Documentation
+- Write README.
+- Write architecture report.
+- Add measurement result.
+- Add AI usage log.
+- Add AI retrospective.
+- Add references.
+
+Step 15: Final reproducibility test
+- Clone repo to new folder.
+- Run commands exactly as README.
+- Confirm system works from scratch.
+
+
+19. README CHECKLIST
+--------------------
+
+README must include:
+
+- Project overview.
+- Architecture diagram or text flow.
+- Tech stack.
+- Folder structure.
+- Environment variables.
+- How to run with Docker Compose.
+- How to start RTSP demo streams.
+- How to register 4 cameras.
+- How to open web dashboard.
+- How to change display FPS.
+- How to test stream disconnection and auto reconnect.
+- How to check MongoDB data.
+- How to enable Telegram optional.
+- How to run tests.
+- How to reproduce measurement.
+- Known limitations.
+- Production improvements.
+
+
+20. TESTING CHECKLIST
+---------------------
+
+Functional tests:
+- Create camera successfully.
+- List cameras with runtime status.
+- Update display FPS.
+- Delete camera stops worker.
+- Invalid RTSP URL does not crash backend.
+- Reconnect count increases when stream stops.
+- Camera returns CONNECTED after stream recovers.
+
+Manual demo tests:
+- Start 4 RTSP streams.
+- Register 4 cameras.
+- Open dashboard and see 4 video tiles.
+- Stop one FFmpeg process.
+- Observe DISCONNECTED then RECONNECTING.
+- Restart FFmpeg process.
+- Observe CONNECTED again.
+- Check stream_events in MongoDB.
+- Check CPU/RAM metrics.
+
+
+21. FINAL MVP SCOPE
+-------------------
+
+Must complete:
+- FastAPI with /api/v1.
+- MongoDB camera config storage.
+- MediaMTX + FFmpeg RTSP simulation.
+- Camera CRUD.
+- StreamManager + StreamWorker.
+- MJPEG video endpoint.
+- 4-camera web grid.
+- Status: CONNECTED, DISCONNECTED, RECONNECTING.
+- actual_fps, display_fps, latency/frame_age, uptime, reconnect_count.
+- CPU/RAM metrics.
+- Auto reconnect.
+- Stream event storage.
+- README reproducible steps.
+
+Good bonus:
+- Telegram alert optional.
+- WebSocket status push.
+- Hot apply display FPS.
+- Stream event table in UI.
+
+Avoid for MVP:
+- Kafka.
+- Kubernetes.
+- Complex microservices.
+- WebRTC unless already familiar.
+- Sending video frames via WebSocket.
+- Updating MongoDB every frame.
+
+
+22. CORE SUMMARY
+----------------
+
+The system is not just CRUD for camera data.
+
+POST /api/v1/cameras must:
+- Save camera configuration to MongoDB.
+- Start a StreamWorker to read the RTSP stream.
+
+GET /api/v1/cameras must:
+- Return camera configuration from MongoDB.
+- Merge runtime status from StreamManager.
+
+StreamWorker must:
+- Read RTSP frames.
+- Calculate FPS and latency.
+- Detect stream failure.
+- Auto reconnect.
+- Update runtime status.
+
+Dashboard must:
+- Show 4 camera streams.
+- Show stream health and metrics.
+- Help the operator know which camera is healthy, failing, reconnecting, or unstable.
+
+This proves the system is a real camera monitoring backend, not only a CRUD API.

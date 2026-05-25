@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VMS Dashboard — ORBRO B1</title>
+  <meta name="description" content="Real-time RTSP camera monitoring dashboard with stream health metrics, FPS tracking, and auto-reconnect status." />
+  <link rel="stylesheet" href="/static/styles.css" />
+  <!-- Lucide icons via CDN (same icons as TSX) -->
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+</head>
+<body>
+<div id="app">
+
+  <!-- =================== HEADER =================== -->
+  <header class="header">
+    <div class="header-brand">
+      <h1 class="header-title">
+        <i data-lucide="camera"></i>
+        VMS Dashboard
+      </h1>
+      <p class="header-subtitle">Backend Test B1 — Camera Monitoring &amp; Streaming</p>
+    </div>
+
+    <div class="header-metrics">
+      <div class="metric-badge" id="cpu-badge">
+        <i data-lucide="cpu" class="metric-icon-ok"></i>
+        <span>CPU: <span id="cpu-val">--</span>%</span>
+      </div>
+      <div class="metric-badge" id="ram-badge">
+        <i data-lucide="hard-drive" class="metric-icon-ram"></i>
+        <span>RAM: <span id="ram-val">--</span>%</span>
+      </div>
+      <div class="metric-badge" id="gpu-badge" style="display:none;">
+        <i data-lucide="zap" style="color:var(--yellow-400)"></i>
+        <span>GPU: <span id="gpu-val">--</span>%</span>
+      </div>
+      <div class="metric-badge">
+        <i data-lucide="activity" style="color:var(--emerald-400)"></i>
+        <span>Streams: <span id="streams-val">0</span></span>
+      </div>
+    </div>
+  </header>
+
+  <!-- =================== MAIN GRID =================== -->
+  <div class="main-grid">
+
+    <!-- LEFT: Camera panel -->
+    <div class="camera-panel">
+      <div class="panel-header">
+        <h2 class="panel-title">
+          <i data-lucide="activity"></i>
+          Camera Streams (Live Preview)
+        </h2>
+        <button class="btn-register" id="btn-open-modal">
+          <i data-lucide="plus"></i>
+          Register Camera
+        </button>
+      </div>
+
+      <!-- Camera grid -->
+      <div class="camera-grid" id="camera-grid">
+        <!-- Tiles injected by app.js -->
+        <div style="grid-column:1/-1; text-align:center; color:var(--slate-600); padding:40px 0;">
+          <i data-lucide="loader" style="animation:pulse 1s infinite"></i>
+          <p style="margin-top:8px; font-family:var(--font-mono); font-size:0.8rem;">Loading cameras...</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT: Side panel -->
+    <div class="right-panel">
+
+      <!-- Chaos Engineering Panel -->
+      <div class="chaos-panel">
+        <div class="chaos-title">
+          <i data-lucide="skull"></i>
+          Chaos Engineering
+        </div>
+        <div class="chaos-grid">
+          <button class="chaos-btn" id="chaos-cpu" title="Simulate HIGH CPU alert">
+            <span class="chaos-btn-title"><i data-lucide="cpu"></i> Spike CPU</span>
+            <span class="chaos-btn-hint">(Send HIGH_CPU event)</span>
+          </button>
+          <button class="chaos-btn" id="chaos-ram" title="Simulate HIGH MEMORY alert">
+            <span class="chaos-btn-title"><i data-lucide="droplets"></i> Mem Alert</span>
+            <span class="chaos-btn-hint">(Send HIGH_MEM event)</span>
+          </button>
+          <button class="chaos-btn" id="chaos-disconnect" title="Kill random camera stream">
+            <span class="chaos-btn-title"><i data-lucide="wifi-off"></i> Kill Stream</span>
+            <span class="chaos-btn-hint">(Stop first camera)</span>
+          </button>
+          <button class="chaos-btn" id="chaos-refresh" title="Force reload all cameras">
+            <span class="chaos-btn-title"><i data-lucide="refresh-cw"></i> Refresh</span>
+            <span class="chaos-btn-hint">(Reload status)</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- System Events Log -->
+      <div class="event-log">
+        <div class="event-log-header">
+          <div class="event-log-title">
+            <i data-lucide="terminal-square"></i>
+            System Events Log
+          </div>
+          <span class="live-badge" id="ws-badge">Polling</span>
+        </div>
+        <div class="event-list" id="event-list">
+          <div class="event-item">
+            <span class="event-time">[--:--:--]</span>
+            <span class="event-msg INFO">System initializing...</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+</div>
+
+<!-- =================== REGISTER MODAL =================== -->
+<div class="modal-overlay" id="modal-overlay" style="display:none;">
+  <div class="modal">
+    <div class="modal-title">
+      <i data-lucide="camera"></i>
+      Register New Camera
+    </div>
+    <form id="register-form">
+      <div class="form-group">
+        <label class="form-label" for="form-name">Camera Name *</label>
+        <input class="form-input" id="form-name" type="text" placeholder="e.g. Main Gate" required />
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="form-url">RTSP URL *</label>
+        <input class="form-input" id="form-url" type="text" placeholder="rtsp://mediamtx:8554/cam5" required />
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="form-resolution">Resolution</label>
+        <input class="form-input" id="form-resolution" type="text" placeholder="640x360" value="640x360" />
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="form-fps">Target FPS</label>
+        <input class="form-input" id="form-fps" type="number" value="10" min="1" max="60" />
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="form-display-fps">Display FPS</label>
+        <select class="form-input fps-select" id="form-display-fps">
+          <option value="1">1</option>
+          <option value="3">3</option>
+          <option value="5" selected>5</option>
+          <option value="10">10</option>
+          <option value="15">15</option>
+        </select>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn-cancel" id="btn-close-modal">Cancel</button>
+        <button type="submit" class="btn-submit">Register</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- =================== TOAST CONTAINER =================== -->
+<div class="toast-container" id="toast-container"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
