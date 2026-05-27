@@ -20,20 +20,24 @@ logger = logging.getLogger(__name__)
 
 def _merge_with_runtime(camera_doc: dict) -> dict:
     """Merge MongoDB config with runtime status from StreamManager."""
-    runtime = stream_manager.get_status(camera_doc["id"])
+    camera_id = camera_doc["id"]
+    runtime = stream_manager.get_status(camera_id)
     if runtime:
         camera_doc.update({
             "status": runtime["status"],
             "actual_fps": runtime["actual_fps"],
             "latency_ms": runtime["latency_ms"],
-            "frame_age_ms": runtime["frame_age_ms"],
             "uptime_seconds": runtime["uptime_seconds"],
             "reconnect_count": runtime["reconnect_count"],
             "last_frame_at": runtime["last_frame_at"],
             "last_connected_at": runtime["last_connected_at"],
             "last_disconnected_at": runtime["last_disconnected_at"],
             "last_error": runtime["last_error"],
+            "simulated_offline": runtime.get("simulated_offline", False),
         })
+    # Inject HLS URL (generated from rtsp_url, served by MediaMTX)
+    hls_url = stream_manager.get_hls_url(camera_id)
+    camera_doc["hls_url"] = hls_url
     return camera_doc
 
 
@@ -92,10 +96,10 @@ class CameraService:
         enabled_changed = data.enabled is not None and data.enabled != existing["enabled"]
 
         if rtsp_changed or enabled_changed:
-            # Restart worker
+            # Re-register with new config (MediaMTX poller picks up new rtsp_path)
             await stream_manager.restart_camera(updated)
         elif data.display_fps is not None:
-            # Hot-update display FPS without restart
+            # Hot-update display FPS (no stream restart needed)
             stream_manager.update_display_fps(camera_id, data.display_fps)
 
         return _merge_with_runtime(updated)

@@ -7,7 +7,7 @@ This model only stores persistent configuration.
 from datetime import datetime
 from typing import Optional
 from bson import ObjectId
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class PyObjectId(ObjectId):
@@ -29,6 +29,12 @@ class PyObjectId(ObjectId):
 
 class CameraDocument(BaseModel):
     """Represents a camera document in the 'cameras' MongoDB collection."""
+    model_config = ConfigDict(
+        populate_by_name=True,
+        arbitrary_types_allowed=True,
+        json_encoders={ObjectId: str},
+    )
+
     id: Optional[PyObjectId] = Field(default=None, alias="_id")
     name: str
     rtsp_url: str
@@ -39,8 +45,3 @@ class CameraDocument(BaseModel):
     description: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
-
-    class Config:
-        populate_by_name = True
-        arbitrary_types_allowed = True
-        json_encoders = {ObjectId: str}

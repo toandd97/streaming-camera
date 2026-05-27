@@ -8,24 +8,21 @@ if (-not (Test-Path ".env")) {
 
 # 2. Check for video
 $videoFile = $null
-if (Test-Path "video") {
-    $videos = Get-ChildItem -Path "video" -Filter "*.mp4"
+if (Test-Path "resources\videos") {
+    $videos = Get-ChildItem -Path "resources\videos" -Filter "*.mp4"
     if ($videos.Count -gt 0) {
-        $videoFile = "video/" + $videos[0].Name
+        $videoFile = "resources/videos/" + $videos[0].Name
         Write-Host "[OK] Using existing video: $videoFile" -ForegroundColor Green
     }
 }
 if ($null -eq $videoFile) {
-    if (Test-Path "videos\sample.mp4") {
-        $videoFile = "videos/sample.mp4"
-        Write-Host "[OK] Using existing video: $videoFile" -ForegroundColor Green
-    } else {
-        New-Item -ItemType Directory -Force -Path "videos" | Out-Null
-        Write-Host "[INFO] Downloading sample video (Big Buck Bunny ~1MB)..." -ForegroundColor Yellow
-        Invoke-WebRequest -Uri "https://sample-videos.com/video321/mp4/720/big_buck_bunny_720p_1mb.mp4" -OutFile "videos\sample.mp4"
-        $videoFile = "videos/sample.mp4"
-        Write-Host "[OK] Downloaded sample video." -ForegroundColor Green
-    }
+    New-Item -ItemType Directory -Force -Path "resources\videos" | Out-Null
+    New-Item -ItemType Directory -Force -Path "resources\images" | Out-Null
+    New-Item -ItemType Directory -Force -Path "resources\excel" | Out-Null
+    Write-Host "[INFO] Downloading sample video (Big Buck Bunny ~1MB)..." -ForegroundColor Yellow
+    Invoke-WebRequest -Uri "https://sample-videos.com/video321/mp4/720/big_buck_bunny_720p_1mb.mp4" -OutFile "resources\videos\sample.mp4"
+    $videoFile = "resources/videos/sample.mp4"
+    Write-Host "[OK] Downloaded sample video." -ForegroundColor Green
 }
 
 # 3. Docker Compose

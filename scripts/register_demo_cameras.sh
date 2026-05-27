@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# register_demo_cameras.sh — Register 4 demo cameras via API
+# register_demo_cameras.sh — Register 4 distinct demo-video RTSP cameras via API
 #
 # Usage:
 #   bash scripts/register_demo_cameras.sh [base_url]
@@ -11,14 +11,14 @@
 BASE_URL=${1:-http://localhost:8000}
 API="$BASE_URL/api/v1"
 
-declare -a NAMES=("Cam 1 (Main Gate)" "Cam 2 (Parking)" "Cam 3 (Warehouse)" "Cam 4 (Office)")
-declare -a PATHS=("cam1" "cam2" "cam3" "cam4")
+declare -a NAMES=("Main Gate (Garden)" "Parking (Office)" "Warehouse (Door)" "Outdoor (Fire)")
+declare -a PATHS=("demo/garden" "demo/office" "demo/door" "demo/fire")
 
 # When backend runs in Docker: use mediamtx hostname
 # When backend runs on host: use localhost
 RTSP_HOST="mediamtx"
 
-echo "Registering 4 demo cameras to $API"
+echo "Registering 4 distinct demo-video cameras to $API"
 echo ""
 
 for i in 0 1 2 3; do

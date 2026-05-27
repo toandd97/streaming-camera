@@ -163,7 +163,7 @@ async def test_get_camera_not_found():
 
 
 @pytest.mark.asyncio
-async def test_invalid_rtsp_url_format():
+async def test_invalid_display_fps():
     """Camera with invalid display_fps should raise validation error."""
     from app.schemas.camera_schema import CameraCreate
     from pydantic import ValidationError
@@ -174,3 +174,18 @@ async def test_invalid_rtsp_url_format():
             rtsp_url="rtsp://host/path",
             display_fps=99,  # Not in ALLOWED_DISPLAY_FPS
         )
+
+
+@pytest.mark.asyncio
+async def test_invalid_rtsp_url_value():
+    """Camera with invalid rtsp_url value like 'test' should raise validation error."""
+    from app.schemas.camera_schema import CameraCreate
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as excinfo:
+        CameraCreate(
+            name="Test",
+            rtsp_url="invalid_url_without_protocol",
+            display_fps=5,
+        )
+    assert "RTSP URL must start with" in str(excinfo.value)

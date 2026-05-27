@@ -1,5 +1,5 @@
 param(
-    [string]$VideoFile = "videos/sample.mp4",
+    [string]$VideoFile = "resources/videos/sample.mp4",
     [int]$NumStreams = 4,
     [string]$RtspHost = "localhost",
     [string]$RtspPort = "8554"

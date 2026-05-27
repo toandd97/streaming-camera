@@ -14,7 +14,7 @@
 
 set -e
 
-VIDEO=${1:-videos/sample.mp4}
+VIDEO=${1:-resources/videos/sample.mp4}
 NUM=${2:-4}
 RTSP_HOST=${3:-localhost}
 RTSP_PORT=${4:-8554}
@@ -35,7 +35,7 @@ PID_FILE="/tmp/orbro_ffmpeg_pids"
 for i in $(seq 1 "$NUM"); do
   RTSP_URL="rtsp://$RTSP_HOST:$RTSP_PORT/cam$i"
   
-  ffmpeg -re -stream_loop -1 \
+  nohup ffmpeg -re -stream_loop -1 \
     -i "$VIDEO" \
     -c:v libx264 \
     -preset ultrafast \
@@ -45,7 +45,7 @@ for i in $(seq 1 "$NUM"); do
     -f rtsp \
     "$RTSP_URL" \
     -loglevel warning \
-    &
+    > /dev/null 2>&1 &
   
   PID=$!
   echo "$PID" >> "$PID_FILE"

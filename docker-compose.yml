@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   mongo:
     image: mongo:7
@@ -25,12 +23,16 @@ services:
       - "8889:8889"   # WebRTC (optional)
     environment:
       - MTX_PROTOCOLS=tcp
+      - MTX_API=yes
+    volumes:
+      - ./deploy/mediamtx.yml:/mediamtx.yml
 
-  backend:
+  streaming-camera-app:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: orbro_backend
+    image: streaming-camera-app:latest
+    container_name: streaming-camera-app
     restart: unless-stopped
     ports:
       - "8000:8000"
@@ -39,8 +41,9 @@ services:
     environment:
       - MONGO_URI=mongodb://mongo:27017
     volumes:
-      - ./video:/app/video:ro
+      - ./resources:/app/resources:ro
       - ./scripts:/app/scripts:ro
+      - ./app/web:/app/app/web:ro
     depends_on:
       mongo:
         condition: service_healthy
@@ -52,6 +55,30 @@ services:
       timeout: 5s
       retries: 5
 
+  demo-publisher:
+    image: streaming-camera-app:latest
+    container_name: orbro_demo_publisher
+    restart: unless-stopped
+    entrypoint: ["bash", "/app/scripts/publish_demo_library.sh"]
+    environment:
+      - VIDEO_DIR=/app/resources/videos
+      - DEMO_CACHE_DIR=/app/demo_cache
+      - RTSP_HOST=mediamtx
+      - RTSP_PORT=8554
+      - PATH_PREFIX=demo
+      - MAX_STREAMS=80
+    volumes:
+      - ./resources:/app/resources:ro
+      - ./scripts:/app/scripts:ro
+      - demo_cache:/app/demo_cache
+    depends_on:
+      mediamtx:
+        condition: service_started
+    profiles:
+      - demo
+
 volumes:
   mongo_data:
+    driver: local
+  demo_cache:
     driver: local

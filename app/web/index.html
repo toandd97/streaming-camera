@@ -6,8 +6,10 @@
   <title>VMS Dashboard — ORBRO B1</title>
   <meta name="description" content="Real-time RTSP camera monitoring dashboard with stream health metrics, FPS tracking, and auto-reconnect status." />
   <link rel="stylesheet" href="/static/styles.css" />
-  <!-- Lucide icons via CDN (same icons as TSX) -->
+  <!-- Lucide icons via CDN -->
   <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <!-- hls.js for HLS streaming support in Chrome/Firefox -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js"></script>
 </head>
 <body>
 <div id="app">
@@ -71,32 +73,6 @@
     <!-- RIGHT: Side panel -->
     <div class="right-panel">
 
-      <!-- Chaos Engineering Panel -->
-      <div class="chaos-panel">
-        <div class="chaos-title">
-          <i data-lucide="skull"></i>
-          Chaos Engineering
-        </div>
-        <div class="chaos-grid">
-          <button class="chaos-btn" id="chaos-cpu" title="Simulate HIGH CPU alert">
-            <span class="chaos-btn-title"><i data-lucide="cpu"></i> Spike CPU</span>
-            <span class="chaos-btn-hint">(Send HIGH_CPU event)</span>
-          </button>
-          <button class="chaos-btn" id="chaos-ram" title="Simulate HIGH MEMORY alert">
-            <span class="chaos-btn-title"><i data-lucide="droplets"></i> Mem Alert</span>
-            <span class="chaos-btn-hint">(Send HIGH_MEM event)</span>
-          </button>
-          <button class="chaos-btn" id="chaos-disconnect" title="Kill random camera stream">
-            <span class="chaos-btn-title"><i data-lucide="wifi-off"></i> Kill Stream</span>
-            <span class="chaos-btn-hint">(Stop first camera)</span>
-          </button>
-          <button class="chaos-btn" id="chaos-refresh" title="Force reload all cameras">
-            <span class="chaos-btn-title"><i data-lucide="refresh-cw"></i> Refresh</span>
-            <span class="chaos-btn-hint">(Reload status)</span>
-          </button>
-        </div>
-      </div>
-
       <!-- System Events Log -->
       <div class="event-log">
         <div class="event-log-header">
@@ -114,17 +90,72 @@
         </div>
       </div>
 
+      <!-- Telegram Settings -->
+      <div class="event-log telegram-settings">
+        <div class="event-log-header">
+          <div class="event-log-title">
+            <i data-lucide="send"></i>
+            Telegram Alerts
+          </div>
+          <span class="live-badge" id="telegram-status">Not configured</span>
+        </div>
+        <form id="telegram-form" class="settings-form">
+          <p class="form-hint">Disabled until a test message is successfully delivered.</p>
+          <label class="form-label" for="telegram-token">Bot Token</label>
+          <div class="secret-input">
+            <input class="form-input" id="telegram-token" type="password"
+                   autocomplete="off" placeholder="Enter bot token" />
+            <button class="secret-toggle" type="button" data-target="telegram-token"
+                    aria-label="Show bot token">
+              <i data-lucide="eye"></i>
+            </button>
+          </div>
+          <p class="form-hint" id="telegram-token-hint">Token is not configured.</p>
+          <label class="form-label" for="telegram-chat-id">Chat ID</label>
+          <div class="secret-input">
+            <input class="form-input" id="telegram-chat-id" type="password"
+                   autocomplete="off" placeholder="Enter chat ID" />
+            <button class="secret-toggle" type="button" data-target="telegram-chat-id"
+                    aria-label="Show chat ID">
+              <i data-lucide="eye"></i>
+            </button>
+          </div>
+          <button class="btn-submit settings-submit" type="submit">Save &amp; Test Telegram</button>
+        </form>
+      </div>
+
+      <!-- Simulation Controls -->
+      <div class="event-log">
+        <div class="event-log-header">
+          <div class="event-log-title">
+            <i data-lucide="sliders"></i>
+            Simulation Panel
+          </div>
+        </div>
+        <div style="padding: 14px; display: flex; flex-direction: column; gap: 10px;">
+          <p style="font-size: 0.78rem; color: var(--slate-400);">Simulate system warnings (Telegram + UI alert):</p>
+          <div style="display: flex; gap: 8px;">
+            <button class="btn-tile btn-edit" id="btn-sim-cpu" style="flex: 1; justify-content: center; padding: 8px; font-weight: 600;">
+              <i data-lucide="cpu" style="width: 14px; height: 14px;"></i> High CPU
+            </button>
+            <button class="btn-tile" id="btn-sim-mem" style="flex: 1; justify-content: center; padding: 8px; font-weight: 600; color: var(--orange-300); border-color: rgba(253,186,116,0.35); background: rgba(253,186,116,0.1);">
+              <i data-lucide="hard-drive" style="width: 14px; height: 14px;"></i> High RAM
+            </button>
+          </div>
+        </div>
+      </div>
+
     </div>
   </div>
 
 </div>
 
-<!-- =================== REGISTER MODAL =================== -->
+<!-- =================== REGISTER / EDIT MODAL =================== -->
 <div class="modal-overlay" id="modal-overlay" style="display:none;">
   <div class="modal">
-    <div class="modal-title">
+    <div class="modal-title" id="modal-title">
       <i data-lucide="camera"></i>
-      Register New Camera
+      <span id="modal-title-text">Register New Camera</span>
     </div>
     <form id="register-form">
       <div class="form-group">
@@ -136,6 +167,30 @@
         <input class="form-input" id="form-url" type="text" placeholder="rtsp://mediamtx:8554/cam5" required />
       </div>
       <div class="form-group">
+        <label class="form-label" for="form-demo-source">Local Demo Video</label>
+        <select class="form-input" id="form-demo-source">
+          <option value="">Use a custom RTSP URL</option>
+          <option value="rtsp://mediamtx:8554/demo/chair">chair.mp4</option>
+          <option value="rtsp://mediamtx:8554/demo/door">door.mp4</option>
+          <option value="rtsp://mediamtx:8554/demo/fall2">fall2.mp4</option>
+          <option value="rtsp://mediamtx:8554/demo/far">far.mp4</option>
+          <option value="rtsp://mediamtx:8554/demo/fire">fire.mp4</option>
+          <option value="rtsp://mediamtx:8554/demo/garden">garden.mp4</option>
+          <option value="rtsp://mediamtx:8554/demo/garden2">garden2.mp4</option>
+          <option value="rtsp://mediamtx:8554/demo/helmet">helmet.mp4</option>
+          <option value="rtsp://mediamtx:8554/demo/helmet2">helmet2.mp4</option>
+          <option value="rtsp://mediamtx:8554/demo/hide">hide.mp4</option>
+          <option value="rtsp://mediamtx:8554/demo/jump">jump.mp4</option>
+          <option value="rtsp://mediamtx:8554/demo/kickboard">kickboard.mp4</option>
+          <option value="rtsp://mediamtx:8554/demo/kitchen">kitchen.mp4</option>
+          <option value="rtsp://mediamtx:8554/demo/lpr">lpr.mp4</option>
+          <option value="rtsp://mediamtx:8554/demo/office">office.mp4</option>
+          <option value="rtsp://mediamtx:8554/demo/slip">slip.mp4</option>
+          <option value="rtsp://mediamtx:8554/demo/sofa">sofa.mp4</option>
+        </select>
+        <p class="form-hint">Published by the <code>demo-publisher</code> service.</p>
+      </div>
+      <div class="form-group">
         <label class="form-label" for="form-resolution">Resolution</label>
         <input class="form-input" id="form-resolution" type="text" placeholder="640x360" value="640x360" />
       </div>
@@ -144,20 +199,60 @@
         <input class="form-input" id="form-fps" type="number" value="10" min="1" max="60" />
       </div>
       <div class="form-group">
-        <label class="form-label" for="form-display-fps">Display FPS</label>
+        <label class="form-label" for="form-display-fps">Display FPS
+          <span style="font-weight:400; color:var(--slate-500); font-size:0.72rem;">(browser canvas throttle)</span>
+        </label>
         <select class="form-input fps-select" id="form-display-fps">
-          <option value="1">1</option>
-          <option value="3">3</option>
-          <option value="5" selected>5</option>
-          <option value="10">10</option>
-          <option value="15">15</option>
+          <option value="1">1 FPS — ultra low (low CPU)</option>
+          <option value="5" selected>5 FPS — default</option>
+          <option value="10">10 FPS</option>
+          <option value="15">15 FPS</option>
+          <option value="30">30 FPS — smooth</option>
+          <option value="60">60 FPS — high</option>
+          <option value="75">75 FPS</option>
+          <option value="120">120 FPS — very high CPU</option>
         </select>
       </div>
       <div class="modal-actions">
         <button type="button" class="btn-cancel" id="btn-close-modal">Cancel</button>
-        <button type="submit" class="btn-submit">Register</button>
+        <button type="submit" class="btn-submit" id="btn-submit-camera">Register</button>
       </div>
     </form>
+  </div>
+</div>
+
+<!-- =================== STREAM EXPAND MODAL =================== -->
+<div class="modal-overlay" id="stream-modal-overlay" style="display:none;">
+  <div class="modal" style="max-width: 800px; display: flex; flex-direction: column; gap: 16px;">
+    <div class="modal-header" style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--slate-800); padding-bottom: 12px;">
+      <div class="modal-title" style="margin-bottom: 0;">
+        <i data-lucide="video" style="color: var(--blue-400);"></i>
+        <span id="stream-modal-title-text" style="color: white; font-weight: 700;">Camera Live Feed</span>
+      </div>
+      <button type="button" class="btn-cancel" id="btn-close-stream-modal" style="padding: 6px 12px; font-size: 0.8rem; border-radius: var(--radius-sm); display: flex; align-items: center; gap: 4px;">
+        <i data-lucide="x" style="width: 14px; height: 14px;"></i> Close
+      </button>
+    </div>
+
+    <div class="stream-modal-content" style="display: flex; flex-direction: column; gap: 14px;">
+      <div class="video-area" style="height: 400px; cursor: default; position: relative;">
+        <video class="video-feed" id="stream-modal-video" autoplay muted playsinline style="display:none; width: 100%; height: 100%; object-fit: contain;"></video>
+        <canvas id="stream-modal-canvas" style="display:none; width:100%; height:100%; object-fit:contain;"></canvas>
+        <div class="video-placeholder" id="stream-modal-placeholder" style="display:flex;">
+          <i data-lucide="wifi-off" style="width: 48px; height: 48px; color: var(--slate-600);"></i>
+          <span class="placeholder-label" style="font-family: var(--font-mono); font-size: 0.8rem; letter-spacing: 2px; color: var(--slate-500);">NO SIGNAL</span>
+        </div>
+      </div>
+
+      <div class="stream-modal-details" style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px 20px; font-size: 0.85rem; background: var(--slate-950); padding: 14px; border-radius: var(--radius-md); border: 1px solid var(--slate-800);">
+        <div style="display: flex; justify-content: space-between;"><span style="color: var(--slate-400);">RTSP URL:</span><span id="stream-modal-rtsp" class="metric-val" style="word-break: break-all; text-align: right; margin-left: 10px;">--</span></div>
+        <div style="display: flex; justify-content: space-between;"><span style="color: var(--slate-400);">Status:</span><span id="stream-modal-status" class="metric-val">--</span></div>
+        <div style="display: flex; justify-content: space-between;"><span style="color: var(--slate-400);">Resolution:</span><span id="stream-modal-resolution" class="metric-val">--</span></div>
+        <div style="display: flex; justify-content: space-between;"><span style="color: var(--slate-400);">Uptime:</span><span id="stream-modal-uptime" class="metric-val">--</span></div>
+        <div style="display: flex; justify-content: space-between;"><span style="color: var(--slate-400);">Reconnects:</span><span id="stream-modal-reconnects" class="metric-val">--</span></div>
+        <div style="display: flex; justify-content: space-between;"><span style="color: var(--slate-400);">Display FPS:</span><span id="stream-modal-display-fps" class="metric-val">--</span></div>
+      </div>
+    </div>
   </div>
 </div>
 

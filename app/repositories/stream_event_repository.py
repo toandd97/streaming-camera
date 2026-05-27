@@ -1,27 +1,21 @@
 """
 StreamEvent repository — direct MongoDB access for the 'stream_events' collection.
 """
-import logging
 from typing import Optional
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
-logger = logging.getLogger(__name__)
+from app.common.serializers import serialize_mongo_document
+from app.repositories.base_repository import BaseRepository
 
 
-def _serialize(doc: dict) -> dict:
-    if doc and "_id" in doc:
-        doc["id"] = str(doc.pop("_id"))
-    return doc
+class StreamEventRepository(BaseRepository):
+    collection_name = "stream_events"
 
-
-class StreamEventRepository:
     def __init__(self, db: AsyncIOMotorDatabase):
-        self.col = db.stream_events
+        super().__init__(db)
 
     async def create(self, data: dict) -> dict:
-        result = await self.col.insert_one(data)
-        doc = await self.col.find_one({"_id": result.inserted_id})
-        return _serialize(doc)
+        return await self.insert_one(data)
 
     async def list_events(
         self,
@@ -40,4 +34,4 @@ class StreamEventRepository:
 
         cursor = self.col.find(query).sort("created_at", -1).limit(limit)
         docs = await cursor.to_list(length=limit)
-        return [_serialize(d) for d in docs]
+        return [serialize_mongo_document(d) for d in docs]

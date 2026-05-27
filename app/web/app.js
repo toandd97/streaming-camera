@@ -1,34 +1,224 @@
 /**
  * ORBRO VMS Dashboard — app.js
  *
- * Architecture:
- *  - WebSocket to /api/v1/ws/dashboard for real-time updates
- *  - Falls back to polling GET /api/v1/cameras every 2s if WS fails
- *  - Polls GET /api/v1/system/metrics every 2s
- *  - Polls GET /api/v1/stream-events for event log (if no WS)
+ * Architecture (scaled for 80+ cameras):
+ *  - WebSocket to /api/v1/ws/dashboard for real-time status updates
+ *  - Falls back to polling GET /api/v1/cameras every 5s if WS fails
+ *  - HLS video via hls.js (MediaMTX serves segments, Python NOT in video path)
+ *  - IntersectionObserver: only load HLS streams for visible camera tiles
+ *    → 80 cameras but only 4-8 load at once (viewport lazy loading)
  */
 
 const API = '/api/v1';
-const POLL_INTERVAL_MS = 2000;
+const POLL_INTERVAL_MS = 5000;
 const EVENT_LIMIT = 80;
-const ALLOWED_FPS = [1, 3, 5, 10, 15];
+const ALLOWED_FPS = [1, 5, 10, 15, 30, 60, 75, 120];
 
 // ─── State ───────────────────────────────────────────────────────────────────
-let cameras = [];        // [{id, name, rtsp_url, status, actual_fps, ...}]
+let cameras = [];        // [{id, name, rtsp_url, hls_url, status, actual_fps, ...}]
 let events = [];         // [{id, time, type, message}]
 let ws = null;
 let wsConnected = false;
 let pollingTimers = [];
+let editingCameraId = null;
+let maximizedCameraId = null;
+let maximizedHls = null;
+
+// HLS player instances: camera_id → Hls instance
+const hlsPlayers = {};
+
+// Canvas throttle: camera_id → { rafId, lastDrawTime, displayFps }
+const canvasThrottles = {};
+
+// IntersectionObserver for lazy-loading HLS streams
+let tileObserver = null;
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   lucide.createIcons();
   setupModal();
-  setupChaosButtons();
+  setupStreamModal();
+  setupSimulationPanel();
+  setupTelegramPanel();
+  initTileObserver();
   connectWebSocket();
   startPolling();
   addEvent('INFO', 'Dashboard initialized. Connecting to backend...');
 });
+
+// ─── IntersectionObserver — Lazy HLS loading ──────────────────────────────────
+function initTileObserver() {
+  tileObserver = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      const tile = entry.target;
+      const cameraId = tile.dataset.cameraId;
+      if (!cameraId) return;
+
+      if (entry.isIntersecting) {
+        // Tile is visible — start HLS if camera is connected
+        const cam = cameras.find(c => c.id === cameraId);
+        if (cam && cam.status === 'CONNECTED' && cam.hls_url) {
+          startHLS(cameraId, cam.hls_url, cam.display_fps ?? 5);
+        }
+      } else {
+        // Tile scrolled out of view — destroy HLS to free resources
+        destroyHLS(cameraId);
+      }
+    });
+  }, {
+    root: null,       // viewport
+    rootMargin: '50px',
+    threshold: 0.1,
+  });
+}
+
+// ─── HLS Player Management ────────────────────────────────────────────────────
+function startHLS(cameraId, hlsUrl, displayFps) {
+  if (hlsPlayers[cameraId]) return; // already playing
+
+  const video = document.getElementById(`video-${cameraId}`);
+  const canvas = document.getElementById(`canvas-${cameraId}`);
+  const placeholder = document.getElementById(`placeholder-${cameraId}`);
+  if (!video || !hlsUrl) return;
+
+  if (Hls.isSupported()) {
+    const hls = new Hls({
+      enableWorker: true,
+      lowLatencyMode: false,
+      backBufferLength: 10,
+      maxBufferLength: 15,
+      startLevel: -1, // auto quality
+    });
+    hls.loadSource(hlsUrl);
+    hls.attachMedia(video);
+
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      video.play().catch(() => {});
+      // Show canvas (throttled draw), keep video hidden
+      if (canvas) {
+        canvas.style.display = 'block';
+        startCanvasThrottle(cameraId, video, canvas, displayFps ?? 5);
+      } else {
+        // Fallback: show video directly
+        video.style.display = 'block';
+      }
+      if (placeholder) placeholder.style.display = 'none';
+    });
+
+    hls.on(Hls.Events.ERROR, (event, data) => {
+      if (data.fatal) {
+        console.warn(`HLS fatal error for ${cameraId}:`, data.type);
+        destroyHLS(cameraId);
+        showPlaceholder(cameraId, false);
+      }
+    });
+
+    hlsPlayers[cameraId] = hls;
+
+  } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+    // Safari: native HLS support
+    video.src = hlsUrl;
+    video.play().catch(() => {});
+    if (canvas) {
+      canvas.style.display = 'block';
+      startCanvasThrottle(cameraId, video, canvas, displayFps ?? 5);
+    } else {
+      video.style.display = 'block';
+    }
+    if (placeholder) placeholder.style.display = 'none';
+    hlsPlayers[cameraId] = { native: true };
+  }
+}
+
+function destroyHLS(cameraId) {
+  stopCanvasThrottle(cameraId);
+  const hls = hlsPlayers[cameraId];
+  if (!hls) return;
+
+  if (hls.native) {
+    const video = document.getElementById(`video-${cameraId}`);
+    if (video) { video.src = ''; video.load(); }
+  } else if (typeof hls.destroy === 'function') {
+    hls.destroy();
+  }
+  delete hlsPlayers[cameraId];
+
+  const video = document.getElementById(`video-${cameraId}`);
+  if (video) video.style.display = 'none';
+  const canvas = document.getElementById(`canvas-${cameraId}`);
+  if (canvas) canvas.style.display = 'none';
+}
+
+function showPlaceholder(cameraId, isError) {
+  stopCanvasThrottle(cameraId);
+  const video = document.getElementById(`video-${cameraId}`);
+  const canvas = document.getElementById(`canvas-${cameraId}`);
+  const placeholder = document.getElementById(`placeholder-${cameraId}`);
+  if (video) { video.style.display = 'none'; video.src = ''; }
+  if (canvas) canvas.style.display = 'none';
+  if (placeholder) {
+    placeholder.style.display = 'flex';
+    const icon = placeholder.querySelector('[data-lucide]');
+    const label = placeholder.querySelector('.placeholder-label');
+    if (icon) icon.setAttribute('data-lucide', isError ? 'server-crash' : 'wifi-off');
+    if (label) label.textContent = isError ? 'SERVER UNREACHABLE' : 'NO SIGNAL';
+    lucide.createIcons({ nodes: [placeholder] });
+  }
+}
+
+// ─── Canvas FPS Throttle ─────────────────────────────────────────────────────────────────────
+/**
+ * startCanvasThrottle(id, videoEl, canvasEl, fps)
+ *
+ * Uses requestAnimationFrame to read the hidden <video> and draw onto <canvas>
+ * at most `fps` frames per second. This makes the display FPS setting
+ * visually apparent: low FPS = choppy, high FPS = smooth.
+ */
+function startCanvasThrottle(id, videoEl, canvasEl, fps) {
+  stopCanvasThrottle(id); // stop any previous loop for this camera
+
+  const ctx = canvasEl.getContext('2d');
+  const interval = 1000 / Math.max(fps, 1);
+  let lastDraw = 0;
+
+  function loop(ts) {
+    if (!canvasThrottles[id]) return; // stopped externally
+    canvasThrottles[id].rafId = requestAnimationFrame(loop);
+    if (ts - lastDraw < interval) return;
+    lastDraw = ts;
+    if (videoEl.readyState >= 2) { // HAVE_CURRENT_DATA
+      // Match canvas resolution to video intrinsic size for crisp image
+      if (canvasEl.width !== videoEl.videoWidth || canvasEl.height !== videoEl.videoHeight) {
+        canvasEl.width = videoEl.videoWidth || 640;
+        canvasEl.height = videoEl.videoHeight || 360;
+      }
+      ctx.drawImage(videoEl, 0, 0, canvasEl.width, canvasEl.height);
+    }
+  }
+
+  canvasThrottles[id] = { rafId: requestAnimationFrame(loop), displayFps: fps };
+}
+
+function stopCanvasThrottle(id) {
+  const t = canvasThrottles[id];
+  if (t) {
+    cancelAnimationFrame(t.rafId);
+    delete canvasThrottles[id];
+  }
+}
+
+function updateCanvasFps(id, fps) {
+  const t = canvasThrottles[id];
+  if (t) {
+    // Simply update the FPS — the loop reads interval dynamically
+    // Easiest: restart the throttle with the new FPS
+    const video = document.getElementById(`video-${id}`);
+    const canvas = document.getElementById(`canvas-${id}`);
+    if (video && canvas && canvas.style.display !== 'none') {
+      startCanvasThrottle(id, video, canvas, fps);
+    }
+  }
+}
 
 // ─── WebSocket ────────────────────────────────────────────────────────────────
 function connectWebSocket() {
@@ -40,6 +230,7 @@ function connectWebSocket() {
       wsConnected = true;
       updateWsBadge(true);
       addEvent('SUCCESS', 'WebSocket connected. Real-time updates active.');
+      stopPolling();
     };
 
     ws.onmessage = (evt) => {
@@ -53,13 +244,14 @@ function connectWebSocket() {
       wsConnected = false;
       updateWsBadge(false);
       addEvent('WARNING', 'WebSocket disconnected. Falling back to polling...');
-      // Reconnect after 5s
+      startPolling();
       setTimeout(connectWebSocket, 5000);
     };
 
     ws.onerror = () => {
       wsConnected = false;
       updateWsBadge(false);
+      startPolling();
     };
   } catch (e) {
     wsConnected = false;
@@ -70,11 +262,14 @@ function connectWebSocket() {
 function handleWsMessage(msg) {
   switch (msg.type) {
     case 'camera_status_snapshot':
-      // Merge runtime status into existing camera list
       if (Array.isArray(msg.data)) {
         msg.data.forEach(runtime => {
           const cam = cameras.find(c => c.id === runtime.camera_id);
-          if (cam) Object.assign(cam, runtime);
+          if (cam) {
+            const prevHlsUrl = cam.hls_url; // WS payload has no hls_url — preserve it
+            Object.assign(cam, runtime);
+            if (!cam.hls_url) cam.hls_url = prevHlsUrl;
+          }
         });
         renderCameras();
       }
@@ -101,23 +296,25 @@ function updateWsBadge(connected) {
 
 // ─── Polling ──────────────────────────────────────────────────────────────────
 function startPolling() {
+  stopPolling();
   fetchCameras();
   fetchMetrics();
   fetchEvents();
-
   pollingTimers.push(setInterval(fetchCameras, POLL_INTERVAL_MS));
   pollingTimers.push(setInterval(fetchMetrics, POLL_INTERVAL_MS));
-  pollingTimers.push(setInterval(() => {
-    if (!wsConnected) fetchEvents();
-  }, 3000));
+  pollingTimers.push(setInterval(fetchEvents, 6000));
+}
+
+function stopPolling() {
+  pollingTimers.forEach(timer => clearInterval(timer));
+  pollingTimers = [];
 }
 
 async function fetchCameras() {
   try {
     const res = await fetch(`${API}/cameras`);
     if (!res.ok) return;
-    const data = await res.json();
-    cameras = data;
+    cameras = await res.json();
     renderCameras();
   } catch (e) { /* network error */ }
 }
@@ -126,8 +323,7 @@ async function fetchMetrics() {
   try {
     const res = await fetch(`${API}/system/metrics`);
     if (!res.ok) return;
-    const data = await res.json();
-    updateMetrics(data);
+    updateMetrics(await res.json());
   } catch (e) { /* network error */ }
 }
 
@@ -136,11 +332,8 @@ async function fetchEvents() {
     const res = await fetch(`${API}/stream-events?limit=30`);
     if (!res.ok) return;
     const data = await res.json();
-    // Only add new events
     data.reverse().forEach(evt => {
-      if (!events.find(e => e.id === evt.id)) {
-        addEventFromApi(evt);
-      }
+      if (!events.find(e => e.id === evt.id)) addEventFromApi(evt);
     });
   } catch (e) { /* network error */ }
 }
@@ -164,12 +357,10 @@ function updateMetrics(data) {
     ramVal.className = high ? 'metric-value-alert' : '';
     ramBadge.className = 'metric-badge' + (high ? ' alert' : '');
   }
-
   const streamsVal = document.getElementById('streams-val');
   if (streamsVal && data.active_streams !== undefined) {
     streamsVal.textContent = data.active_streams;
   }
-
   const gpuBadge = document.getElementById('gpu-badge');
   const gpuVal = document.getElementById('gpu-val');
   if (data.gpu_available && gpuBadge) {
@@ -193,16 +384,26 @@ function renderCameras() {
     return;
   }
 
+  // Remove any placeholder/loading/no-camera elements that are not tiles
+  Array.from(grid.children).forEach(child => {
+    if (!child.id || !child.id.startsWith('tile-')) {
+      grid.removeChild(child);
+    }
+  });
+
   cameras.forEach(cam => {
     let tile = document.getElementById(`tile-${cam.id}`);
     if (!tile) {
       tile = document.createElement('div');
       tile.id = `tile-${cam.id}`;
       tile.className = 'camera-tile';
+      tile.dataset.cameraId = cam.id;
       tile.innerHTML = buildTileHTML(cam);
       grid.appendChild(tile);
       lucide.createIcons({ nodes: [tile] });
       attachTileListeners(tile, cam);
+      // Start observing for lazy HLS loading
+      if (tileObserver) tileObserver.observe(tile);
     } else {
       updateTile(tile, cam);
     }
@@ -212,6 +413,11 @@ function renderCameras() {
   const ids = cameras.map(c => `tile-${c.id}`);
   Array.from(grid.children).forEach(child => {
     if (!ids.includes(child.id) && child.id.startsWith('tile-')) {
+      const cId = child.dataset.cameraId;
+      if (cId) {
+        if (tileObserver) tileObserver.unobserve(child);
+        destroyHLS(cId);
+      }
       grid.removeChild(child);
     }
   });
@@ -221,20 +427,18 @@ function buildTileHTML(cam) {
   const statusClass = cam.status?.toLowerCase() || 'created';
   const isOnline = cam.status === 'CONNECTED';
   const isError = cam.status === 'ERROR';
-  const lowFps = cam.actual_fps > 0 && cam.actual_fps < cam.target_fps * 0.5;
 
   return `
     <div class="video-area">
-      ${isOnline
-        ? `<img class="video-feed" id="img-${cam.id}"
-               src="${API}/streams/${cam.id}/mjpeg"
-               alt="${cam.name}"
-               onerror="this.style.display='none'; document.getElementById('placeholder-${cam.id}').style.display='flex'" />`
-        : ''}
+      <video class="video-feed" id="video-${cam.id}"
+             autoplay muted playsinline
+             style="display:none;"
+             poster=""></video>
+      <canvas id="canvas-${cam.id}" style="display:none; width:100%; height:100%; object-fit:contain;"></canvas>
       <div class="video-placeholder ${isError ? 'error' : ''}" id="placeholder-${cam.id}"
-           style="${isOnline ? 'display:none' : 'display:flex'}">
+           style="display:flex">
         <i data-lucide="${isError ? 'server-crash' : 'wifi-off'}"></i>
-        <span>${isError ? 'SERVER UNREACHABLE' : 'NO SIGNAL'}</span>
+        <span class="placeholder-label">${isError ? 'SERVER UNREACHABLE' : 'NO SIGNAL'}</span>
       </div>
 
       <div class="badge-status" id="badge-${cam.id}">
@@ -242,8 +446,8 @@ function buildTileHTML(cam) {
         <span id="status-text-${cam.id}">${cam.status ?? 'CREATED'}</span>
       </div>
 
-      <div class="badge-fps ${lowFps ? 'low-fps' : ''}" id="fps-badge-${cam.id}">
-        <span id="fps-val-${cam.id}">${cam.actual_fps?.toFixed(1) ?? '0.0'}</span> FPS
+      <div class="badge-fps" id="fps-badge-${cam.id}">
+        <span class="badge-fps-label" id="fps-label-${cam.id}">${cam.display_fps ?? 5} FPS</span>
       </div>
     </div>
 
@@ -251,37 +455,40 @@ function buildTileHTML(cam) {
       <div class="tile-header">
         <span class="tile-name" title="${cam.rtsp_url}">${cam.name}</span>
         <div class="tile-actions">
-          <button class="btn-tile btn-kill" id="kill-${cam.id}"
-                  ${!isOnline ? 'disabled' : ''}
-                  title="Simulate stream disconnect">
-            <i data-lucide="pause"></i> Kill Stream
+          <button class="btn-tile ${cam.simulated_offline ? 'btn-sim-on' : 'btn-sim-off'}" id="sim-${cam.id}"
+                  title="${cam.simulated_offline ? 'Restore now (simulation automatically restores after 15 seconds)' : 'Simulate offline for 15 seconds; alert is raised after 10 seconds'}">
+            <i data-lucide="${cam.simulated_offline ? 'play' : 'zap-off'}"></i> ${cam.simulated_offline ? 'Sim On' : 'Sim Off'}
+          </button>
+          <button class="btn-tile btn-edit" id="edit-${cam.id}"
+                  title="Edit camera name or stream URL">
+            <i data-lucide="pencil"></i> Edit
+          </button>
+          <button class="btn-tile btn-delete" id="delete-${cam.id}"
+                  title="Delete camera config and stop stream">
+            <i data-lucide="trash-2"></i> Delete
           </button>
         </div>
       </div>
 
       <div class="tile-metrics">
         <div class="tile-metric-row">
-          <span>Latency:</span>
-          <span class="metric-val" id="latency-${cam.id}">
-            ${isOnline ? `${cam.latency_ms?.toFixed(0) ?? '0'}ms` : '---'}
+          <span>Status:</span>
+          <span class="metric-val" id="uptime-${cam.id}">
+            ${cam.status === 'CONNECTED' ? formatUptime(cam.uptime_seconds ?? 0) : (cam.last_error || cam.status || 'CREATED')}
           </span>
-        </div>
-        <div class="tile-metric-row">
-          <span>Display FPS:</span>
-          <select class="fps-select" id="dfps-select-${cam.id}" title="Change display FPS">
-            ${ALLOWED_FPS.map(f =>
-              `<option value="${f}" ${f === cam.display_fps ? 'selected' : ''}>${f}</option>`
-            ).join('')}
-          </select>
         </div>
         <div class="tile-metric-row">
           <span>Reconnects:</span>
           <span class="metric-val reconnects" id="reconn-${cam.id}">${cam.reconnect_count ?? 0}</span>
         </div>
         <div class="tile-metric-row">
-          <span>Uptime:</span>
-          <span class="metric-val" id="uptime-${cam.id}">
-            ${formatUptime(cam.uptime_seconds ?? 0)}
+          <span>Display FPS:</span>
+          <span class="metric-val" id="dfps-${cam.id}">${cam.display_fps ?? 5}</span>
+        </div>
+        <div class="tile-metric-row">
+          <span>HLS Stream:</span>
+          <span class="metric-val" style="font-size:0.7rem; color:var(--slate-500);">
+            ${cam.hls_url ? cam.hls_url.split('/').slice(-3).join('/') : 'N/A'}
           </span>
         </div>
       </div>
@@ -291,94 +498,146 @@ function buildTileHTML(cam) {
 function updateTile(tile, cam) {
   const isOnline = cam.status === 'CONNECTED';
   const isError = cam.status === 'ERROR';
-  const lowFps = cam.actual_fps > 0 && cam.actual_fps < (cam.target_fps || 10) * 0.5;
 
   // Status dot and text
   const dot = tile.querySelector(`#dot-${cam.id}`);
   const statusText = tile.querySelector(`#status-text-${cam.id}`);
   if (dot) dot.className = `status-dot ${cam.status?.toLowerCase() || 'created'}`;
   if (statusText) statusText.textContent = cam.status ?? 'CREATED';
-
-  // FPS badge
-  const fpsBadge = tile.querySelector(`#fps-badge-${cam.id}`);
-  const fpsVal = tile.querySelector(`#fps-val-${cam.id}`);
-  if (fpsBadge) fpsBadge.className = `badge-fps${lowFps ? ' low-fps' : ''}`;
-  if (fpsVal) fpsVal.textContent = cam.actual_fps?.toFixed(1) ?? '0.0';
-
-  // MJPEG img src (reconnect if coming back online)
-  const img = tile.querySelector(`#img-${cam.id}`);
-  const placeholder = tile.querySelector(`#placeholder-${cam.id}`);
-  if (img && placeholder) {
-    if (isOnline) {
-      img.style.display = 'block';
-      placeholder.style.display = 'none';
-      // Refresh MJPEG src on reconnect
-      if (!img.src.includes(cam.id)) {
-        img.src = `${API}/streams/${cam.id}/mjpeg`;
-      }
-    } else {
-      img.style.display = 'none';
-      placeholder.style.display = 'flex';
-      // Update icon
-      const icon = placeholder.querySelector('[data-lucide]');
-      if (icon) icon.setAttribute('data-lucide', isError ? 'server-crash' : 'wifi-off');
-    }
+  const name = tile.querySelector('.tile-name');
+  if (name) {
+    name.textContent = cam.name;
+    name.title = cam.rtsp_url;
   }
-
-  // Kill button state
-  const killBtn = tile.querySelector(`#kill-${cam.id}`);
-  if (killBtn) killBtn.disabled = !isOnline;
 
   // Tile border class
   tile.className = `camera-tile${isError ? ' status-error' : ''}`;
 
+  // Update simulation button
+  const simBtn = tile.querySelector(`#sim-${cam.id}`);
+  if (simBtn) {
+    const isOffline = cam.simulated_offline;
+    simBtn.className = `btn-tile ${isOffline ? 'btn-sim-on' : 'btn-sim-off'}`;
+    simBtn.title = isOffline ? 'Restore now (simulation automatically restores after 15 seconds)' : 'Simulate offline for 15 seconds; alert is raised after 10 seconds';
+    simBtn.innerHTML = `<i data-lucide="${isOffline ? 'play' : 'zap-off'}"></i> ${isOffline ? 'Sim On' : 'Sim Off'}`;
+    lucide.createIcons({ nodes: [simBtn] });
+  }
+
+  // HLS player management based on status change
+  if (isOnline && cam.hls_url) {
+    // Check if tile is visible (IntersectionObserver will handle this too,
+    // but we try immediately in case tile is already visible)
+    const rect = tile.getBoundingClientRect();
+    const isVisible = rect.top < window.innerHeight && rect.bottom > 0;
+    if (isVisible && !hlsPlayers[cam.id]) {
+      startHLS(cam.id, cam.hls_url, cam.display_fps ?? 5);
+    } else if (isVisible && hlsPlayers[cam.id]) {
+      // Already playing — update canvas FPS if it changed
+      updateCanvasFps(cam.id, cam.display_fps ?? 5);
+    }
+  } else if (!isOnline && hlsPlayers[cam.id]) {
+    // Camera went offline — stop streaming
+    destroyHLS(cam.id);
+    showPlaceholder(cam.id, isError);
+  }
+
   // Metrics
-  const latency = tile.querySelector(`#latency-${cam.id}`);
-  if (latency) latency.textContent = isOnline ? `${cam.latency_ms?.toFixed(0) ?? 0}ms` : '---';
+  const uptime = tile.querySelector(`#uptime-${cam.id}`);
+  if (uptime) {
+    uptime.textContent = isOnline
+      ? formatUptime(cam.uptime_seconds ?? 0)
+      : (cam.last_error || cam.status || 'CREATED');
+  }
 
   const reconn = tile.querySelector(`#reconn-${cam.id}`);
   if (reconn) reconn.textContent = cam.reconnect_count ?? 0;
 
-  const uptime = tile.querySelector(`#uptime-${cam.id}`);
-  if (uptime) uptime.textContent = formatUptime(cam.uptime_seconds ?? 0);
+  const dfpsEl = tile.querySelector(`#dfps-${cam.id}`);
+  if (dfpsEl) dfpsEl.textContent = cam.display_fps ?? 5;
+
+  const fpsLabel = tile.querySelector(`#fps-label-${cam.id}`);
+  if (fpsLabel) fpsLabel.textContent = `${cam.display_fps ?? 5} FPS`;
+
+  // Sync real-time updates to maximized modal
+  if (maximizedCameraId === cam.id) {
+    const modalStatus = document.getElementById('stream-modal-status');
+    const modalUptime = document.getElementById('stream-modal-uptime');
+    const modalReconn = document.getElementById('stream-modal-reconnects');
+
+    if (modalStatus) modalStatus.textContent = cam.status ?? 'CREATED';
+    if (modalUptime) {
+      modalUptime.textContent = isOnline
+        ? formatUptime(cam.uptime_seconds ?? 0)
+        : (cam.last_error || cam.status || 'CREATED');
+    }
+    if (modalReconn) modalReconn.textContent = cam.reconnect_count ?? 0;
+
+    // Restart player in modal if stream connects
+    const modalVideo = document.getElementById('stream-modal-video');
+    const modalPlaceholder = document.getElementById('stream-modal-placeholder');
+    if (isOnline && cam.hls_url && !maximizedHls) {
+      startMaximizedHLS(cam.hls_url, cam.display_fps ?? 5);
+    } else if (!isOnline && maximizedHls) {
+      destroyMaximizedHLS();
+      if (modalPlaceholder) modalPlaceholder.style.display = 'flex';
+    }
+  }
 }
 
 function attachTileListeners(tile, cam) {
-  // Kill stream button
-  const killBtn = tile.querySelector(`#kill-${cam.id}`);
-  if (killBtn) {
-    killBtn.addEventListener('click', () => simulateDisconnect(cam.id));
+  const editBtn = tile.querySelector(`#edit-${cam.id}`);
+  if (editBtn) {
+    editBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openEditModal(cam.id);
+    });
   }
-
-  // Display FPS select
-  const fpsSelect = tile.querySelector(`#dfps-select-${cam.id}`);
-  if (fpsSelect) {
-    fpsSelect.addEventListener('change', (e) => {
-      updateDisplayFps(cam.id, parseInt(e.target.value));
+  const deleteBtn = tile.querySelector(`#delete-${cam.id}`);
+  if (deleteBtn) {
+    deleteBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      deleteCamera(cam.id);
+    });
+  }
+  const simBtn = tile.querySelector(`#sim-${cam.id}`);
+  if (simBtn) {
+    simBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      // Read current state from cameras array — NOT from captured `cam` reference.
+      // `cam` becomes stale after fetchCameras() replaces the cameras array.
+      const currentCam = cameras.find(c => c.id === cam.id);
+      const isCurrentlyOffline = currentCam?.simulated_offline ?? false;
+      toggleCameraSimulation(cam.id, isCurrentlyOffline);
+    });
+  }
+  const videoArea = tile.querySelector('.video-area');
+  if (videoArea) {
+    videoArea.addEventListener('click', (e) => {
+      if (!e.target.closest('.badge-status') && !e.target.closest('.badge-fps')) {
+        openStreamModal(cam.id);
+      }
     });
   }
 }
 
 // ─── API Actions ──────────────────────────────────────────────────────────────
-async function simulateDisconnect(cameraId) {
-  // Simulates killing a stream by patching display_fps to 1 (just a debug trigger)
-  // In real scenario: call stop_rtsp_streams.sh
-  addEvent('INFO', `[Debug] Kill Stream triggered for camera ${cameraId}`);
-  showToast('Stream kill signal sent (stop the FFmpeg process manually)', 'info');
-}
-
-async function updateDisplayFps(cameraId, fps) {
+async function deleteCamera(cameraId) {
+  if (!confirm('Are you sure you want to delete this camera?')) return;
   try {
-    const res = await fetch(`${API}/cameras/${cameraId}/display-fps`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ display_fps: fps }),
-    });
+    const res = await fetch(`${API}/cameras/${cameraId}`, { method: 'DELETE' });
     if (res.ok) {
-      addEvent('INFO', `Display FPS updated to ${fps} for camera ${cameraId}`);
+      destroyHLS(cameraId);
+      if (maximizedCameraId === cameraId) {
+        closeStreamModal();
+      }
+      showToast('Camera deleted successfully', 'success');
+      addEvent('INFO', `Deleted camera: ${cameraId}`);
+      await fetchCameras();
+    } else {
+      showToast('Failed to delete camera', 'error');
     }
   } catch (e) {
-    showToast('Failed to update display FPS', 'error');
+    showToast('Network error while deleting camera', 'error');
   }
 }
 
@@ -403,6 +662,29 @@ async function registerCamera(formData) {
   }
 }
 
+async function updateCamera(cameraId, formData) {
+  try {
+    const res = await fetch(`${API}/cameras/${cameraId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(formData),
+    });
+    if (res.ok) {
+      const cam = await res.json();
+      destroyHLS(cameraId);
+      showToast(`Camera "${cam.name}" updated`, 'success');
+      addEvent('INFO', `Camera updated: ${cam.name} -> ${cam.rtsp_url}`);
+      await fetchCameras();
+      return true;
+    }
+    const err = await res.json();
+    showToast(`Error: ${err.detail || 'Update failed'}`, 'error');
+  } catch (e) {
+    showToast('Network error while updating camera', 'error');
+  }
+  return false;
+}
+
 // ─── Event Log ────────────────────────────────────────────────────────────────
 function addEvent(type, message) {
   const id = `evt-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -413,7 +695,6 @@ function addEvent(type, message) {
 }
 
 function addEventFromApi(evt) {
-  // Map API severity/event_type to display type
   const typeMap = {
     'INFO': 'INFO', 'SUCCESS': 'SUCCESS',
     'WARNING': 'WARNING', 'CRITICAL': 'CRITICAL', 'ERROR': 'ERROR',
@@ -422,10 +703,8 @@ function addEventFromApi(evt) {
   const time = evt.created_at
     ? new Date(evt.created_at).toLocaleTimeString()
     : new Date().toLocaleTimeString();
-
   const id = evt.id || `evt-${Date.now()}`;
   if (events.find(e => e.id === id)) return;
-
   events.unshift({ id, time, type, message: evt.message });
   if (events.length > EVENT_LIMIT) events = events.slice(0, EVENT_LIMIT);
   renderEvents();
@@ -441,45 +720,24 @@ function renderEvents() {
     </div>`).join('');
 }
 
-// ─── Chaos Buttons ────────────────────────────────────────────────────────────
-function setupChaosButtons() {
-  document.getElementById('chaos-cpu')?.addEventListener('click', () => {
-    addEvent('CRITICAL', 'HIGH CPU ALERT (>90%) — Chaos injection triggered.');
-    showToast('HIGH_CPU event injected', 'info');
-  });
-
-  document.getElementById('chaos-ram')?.addEventListener('click', () => {
-    addEvent('CRITICAL', 'HIGH MEMORY ALERT (>85%) — Memory pressure injected.');
-    showToast('HIGH_MEMORY event injected', 'info');
-  });
-
-  document.getElementById('chaos-disconnect')?.addEventListener('click', () => {
-    if (cameras.length > 0) {
-      const cam = cameras.find(c => c.status === 'CONNECTED') || cameras[0];
-      addEvent('ERROR', `Simulating stream disconnect for [${cam.name}]. Stop FFmpeg manually.`);
-      showToast('Disconnect simulated. Stop FFmpeg process to test.', 'info');
-    }
-  });
-
-  document.getElementById('chaos-refresh')?.addEventListener('click', async () => {
-    await fetchCameras();
-    await fetchMetrics();
-    await fetchEvents();
-    addEvent('INFO', 'Manual refresh triggered.');
-    showToast('Status refreshed', 'success');
-  });
-}
-
 // ─── Register Modal ───────────────────────────────────────────────────────────
 function setupModal() {
   const overlay = document.getElementById('modal-overlay');
   const openBtn = document.getElementById('btn-open-modal');
   const closeBtn = document.getElementById('btn-close-modal');
   const form = document.getElementById('register-form');
+  const urlInput = document.getElementById('form-url');
+  const demoSource = document.getElementById('form-demo-source');
 
-  openBtn?.addEventListener('click', () => { overlay.style.display = 'flex'; });
-  closeBtn?.addEventListener('click', () => { overlay.style.display = 'none'; });
-  overlay?.addEventListener('click', (e) => { if (e.target === overlay) overlay.style.display = 'none'; });
+  openBtn?.addEventListener('click', openRegisterModal);
+  closeBtn?.addEventListener('click', closeCameraModal);
+  overlay?.addEventListener('click', (e) => { if (e.target === overlay) closeCameraModal(); });
+  demoSource?.addEventListener('change', () => {
+    if (demoSource.value) urlInput.value = demoSource.value;
+  });
+  urlInput?.addEventListener('input', () => {
+    if (demoSource.value !== urlInput.value) demoSource.value = '';
+  });
 
   form?.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -491,10 +749,152 @@ function setupModal() {
       display_fps: parseInt(document.getElementById('form-display-fps').value) || 5,
       enabled: true,
     };
-    await registerCamera(data);
-    overlay.style.display = 'none';
-    form.reset();
+    if (editingCameraId) {
+      if (await updateCamera(editingCameraId, data)) closeCameraModal();
+    } else {
+      await registerCamera(data);
+      closeCameraModal();
+    }
   });
+}
+
+function openRegisterModal() {
+  editingCameraId = null;
+  document.getElementById('register-form')?.reset();
+  document.getElementById('modal-title-text').textContent = 'Register New Camera';
+  document.getElementById('btn-submit-camera').textContent = 'Register';
+  document.getElementById('modal-overlay').style.display = 'flex';
+}
+
+function openEditModal(cameraId) {
+  const cam = cameras.find(item => item.id === cameraId);
+  if (!cam) return;
+  editingCameraId = cameraId;
+  document.getElementById('form-name').value = cam.name || '';
+  document.getElementById('form-url').value = cam.rtsp_url || '';
+  document.getElementById('form-demo-source').value = cam.rtsp_url || '';
+  document.getElementById('form-resolution').value = cam.resolution || '640x360';
+  document.getElementById('form-fps').value = cam.target_fps || 10;
+  document.getElementById('form-display-fps').value = cam.display_fps || 5;
+  document.getElementById('modal-title-text').textContent = 'Edit Camera';
+  document.getElementById('btn-submit-camera').textContent = 'Update';
+  document.getElementById('modal-overlay').style.display = 'flex';
+}
+
+function closeCameraModal() {
+  editingCameraId = null;
+  document.getElementById('modal-overlay').style.display = 'none';
+  document.getElementById('register-form')?.reset();
+}
+
+// ─── Stream Maximize Modal ────────────────────────────────────────────────────
+function setupStreamModal() {
+  const overlay = document.getElementById('stream-modal-overlay');
+  const closeBtn = document.getElementById('btn-close-stream-modal');
+  closeBtn?.addEventListener('click', closeStreamModal);
+  overlay?.addEventListener('click', (e) => { if (e.target === overlay) closeStreamModal(); });
+}
+
+function openStreamModal(cameraId) {
+  const cam = cameras.find(c => c.id === cameraId);
+  if (!cam) return;
+  maximizedCameraId = cameraId;
+
+  document.getElementById('stream-modal-title-text').textContent = cam.name;
+  document.getElementById('stream-modal-rtsp').textContent = cam.rtsp_url;
+  document.getElementById('stream-modal-status').textContent = cam.status ?? 'CREATED';
+  document.getElementById('stream-modal-resolution').textContent = cam.resolution || '640x360';
+  document.getElementById('stream-modal-uptime').textContent = cam.status === 'CONNECTED'
+    ? formatUptime(cam.uptime_seconds ?? 0)
+    : (cam.last_error || cam.status || 'CREATED');
+  document.getElementById('stream-modal-reconnects').textContent = cam.reconnect_count ?? 0;
+  document.getElementById('stream-modal-display-fps').textContent = cam.display_fps ?? 5;
+
+  const video = document.getElementById('stream-modal-video');
+  const placeholder = document.getElementById('stream-modal-placeholder');
+  if (video) video.style.display = 'none';
+  if (placeholder) placeholder.style.display = 'flex';
+
+  document.getElementById('stream-modal-overlay').style.display = 'flex';
+  lucide.createIcons({ nodes: [document.getElementById('stream-modal-overlay')] });
+
+  if (cam.status === 'CONNECTED' && cam.hls_url) {
+    startMaximizedHLS(cam.hls_url, cam.display_fps ?? 5);
+  }
+}
+
+function closeStreamModal() {
+  maximizedCameraId = null;
+  document.getElementById('stream-modal-overlay').style.display = 'none';
+  destroyMaximizedHLS();
+}
+
+function startMaximizedHLS(hlsUrl, displayFps) {
+  destroyMaximizedHLS();
+  const video = document.getElementById('stream-modal-video');
+  const canvas = document.getElementById('stream-modal-canvas');
+  const placeholder = document.getElementById('stream-modal-placeholder');
+  if (!video || !hlsUrl) return;
+
+  if (Hls.isSupported()) {
+    maximizedHls = new Hls({
+      enableWorker: true,
+      lowLatencyMode: false,
+      backBufferLength: 10,
+      maxBufferLength: 15,
+      startLevel: -1,
+    });
+    maximizedHls.loadSource(hlsUrl);
+    maximizedHls.attachMedia(video);
+
+    maximizedHls.on(Hls.Events.MANIFEST_PARSED, () => {
+      video.play().catch(() => {});
+      if (canvas) {
+        canvas.style.display = 'block';
+        startCanvasThrottle('__modal__', video, canvas, displayFps ?? 5);
+      } else {
+        video.style.display = 'block';
+      }
+      if (placeholder) placeholder.style.display = 'none';
+    });
+
+    maximizedHls.on(Hls.Events.ERROR, (event, data) => {
+      if (data.fatal) {
+        destroyMaximizedHLS();
+        if (canvas) canvas.style.display = 'none';
+        if (placeholder) placeholder.style.display = 'flex';
+      }
+    });
+  } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+    video.src = hlsUrl;
+    video.play().catch(() => {});
+    if (canvas) {
+      canvas.style.display = 'block';
+      startCanvasThrottle('__modal__', video, canvas, displayFps ?? 5);
+    } else {
+      video.style.display = 'block';
+    }
+    if (placeholder) placeholder.style.display = 'none';
+    maximizedHls = { native: true };
+  }
+}
+
+function destroyMaximizedHLS() {
+  stopCanvasThrottle('__modal__');
+  if (!maximizedHls) return;
+
+  if (maximizedHls.native) {
+    const video = document.getElementById('stream-modal-video');
+    if (video) { video.src = ''; video.load(); }
+  } else if (typeof maximizedHls.destroy === 'function') {
+    maximizedHls.destroy();
+  }
+  maximizedHls = null;
+
+  const video = document.getElementById('stream-modal-video');
+  if (video) video.style.display = 'none';
+  const canvas = document.getElementById('stream-modal-canvas');
+  if (canvas) canvas.style.display = 'none';
 }
 
 // ─── Toast ────────────────────────────────────────────────────────────────────
@@ -524,4 +924,116 @@ function escapeHtml(str) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+// ─── Simulation Controls ──────────────────────────────────────────────────────
+function setupSimulationPanel() {
+  const cpuBtn = document.getElementById('btn-sim-cpu');
+  const memBtn = document.getElementById('btn-sim-mem');
+
+  cpuBtn?.addEventListener('click', async () => {
+    try {
+      const res = await fetch(`${API}/system/simulate/cpu`, { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        showToast(data.message, 'success');
+      } else {
+        showToast('Simulation failed', 'error');
+      }
+    } catch (e) {
+      showToast('Network error during simulation', 'error');
+    }
+  });
+
+  memBtn?.addEventListener('click', async () => {
+    try {
+      const res = await fetch(`${API}/system/simulate/memory`, { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        showToast(data.message, 'success');
+      } else {
+        showToast('Simulation failed', 'error');
+      }
+    } catch (e) {
+      showToast('Network error during simulation', 'error');
+    }
+  });
+}
+
+function setupTelegramPanel() {
+  const form = document.getElementById('telegram-form');
+  const tokenInput = document.getElementById('telegram-token');
+  const chatInput = document.getElementById('telegram-chat-id');
+  const status = document.getElementById('telegram-status');
+  const tokenHint = document.getElementById('telegram-token-hint');
+
+  document.querySelectorAll('.secret-toggle').forEach(button => {
+    button.addEventListener('click', () => {
+      const input = document.getElementById(button.dataset.target);
+      if (!input) return;
+      const currentlyShown = input.type === 'text';
+      input.type = currentlyShown ? 'password' : 'text';
+      button.setAttribute('aria-label', currentlyShown ? 'Show value' : 'Hide value');
+      button.innerHTML = `<i data-lucide="${currentlyShown ? 'eye' : 'eye-off'}"></i>`;
+      lucide.createIcons({ nodes: [button] });
+    });
+  });
+
+  async function loadTelegramConfig() {
+    try {
+      const res = await fetch(`${API}/system/telegram-config`);
+      if (!res.ok) return;
+      const data = await res.json();
+      chatInput.value = data.chat_id || '';
+      const ready = data.enabled && data.token_configured;
+      status.textContent = ready ? 'Enabled' : 'Disabled';
+      status.className = `live-badge${ready ? ' connected' : ''}`;
+      tokenHint.textContent = data.token_configured
+        ? 'Token available. Leave blank to test it, or enter a replacement.'
+        : 'Token is not configured.';
+    } catch (e) {
+      status.textContent = 'Unavailable';
+    }
+  }
+
+  form?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      const res = await fetch(`${API}/system/telegram-config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bot_token: tokenInput.value || null,
+          chat_id: chatInput.value,
+        }),
+      });
+      if (res.ok) {
+        tokenInput.value = '';
+        await loadTelegramConfig();
+        showToast('Test message delivered. Telegram alerts enabled.', 'success');
+      } else {
+        const error = await res.json();
+        showToast(error.detail || 'Could not save Telegram configuration', 'error');
+      }
+    } catch (e) {
+      showToast('Network error while saving Telegram configuration', 'error');
+    }
+  });
+
+  loadTelegramConfig();
+}
+
+async function toggleCameraSimulation(cameraId, currentlyOffline) {
+  const action = currentlyOffline ? 'reconnect' : 'disconnect';
+  try {
+    const res = await fetch(`${API}/system/simulate/${action}/${cameraId}`, { method: 'POST' });
+    if (res.ok) {
+      showToast(currentlyOffline ? 'Restored actual camera status' : 'Simulated offline: alert at 10s, automatic restore at 15s', 'info');
+      await fetchCameras();
+    } else {
+      showToast('Simulation action failed', 'error');
+    }
+  } catch (e) {
+    showToast('Network error during simulation', 'error');
+  }
 }

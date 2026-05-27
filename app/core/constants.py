@@ -29,8 +29,8 @@ class Severity(str, Enum):
     CRITICAL = "CRITICAL"
 
 
-# Allowed display FPS values
-ALLOWED_DISPLAY_FPS = [1, 3, 5, 10, 15]
+# Allowed display FPS values (browser canvas throttle)
+ALLOWED_DISPLAY_FPS = [1, 5, 10, 15, 30, 60, 75, 120]
 
 # WebSocket message types
 WS_CAMERA_STATUS_SNAPSHOT = "camera_status_snapshot"

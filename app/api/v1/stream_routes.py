@@ -1,65 +1,61 @@
 """
-MJPEG streaming endpoint — /api/v1/streams/{camera_id}/mjpeg
+HLS stream info endpoint — /api/v1/streams/{camera_id}/hls-info
 
-Browser uses: <img src="/api/v1/streams/{camera_id}/mjpeg" />
+Returns the HLS URL for a camera so the frontend can play it directly
+via hls.js or native browser HLS support.
 
-The generator yields JPEG frames at display_fps rate.
-When no frame is available, yields a blank placeholder frame.
+Architecture:
+    Browser → GET /api/v1/streams/{id}/hls-info → gets HLS URL
+    Browser → hls.js loads http://localhost:8888/{path}/index.m3u8 directly
+    MediaMTX → serves HLS segments (no Python involved in video delivery)
+
+This scales to 80+ cameras because Python is NOT in the video pipeline.
 """
-import asyncio
 import logging
-from fastapi import APIRouter
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException, status
+from pydantic import BaseModel
+from typing import Optional
 
 from app.services.stream_manager import stream_manager
-from app.utils.image_utils import frame_to_jpeg, get_blank_frame
-from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/streams", tags=["streams"])
 
-BOUNDARY = b"frame"
-CONTENT_TYPE = "multipart/x-mixed-replace; boundary=frame"
+
+class HLSInfo(BaseModel):
+    camera_id: str
+    hls_url: Optional[str]
+    rtsp_path: str
+    available: bool
 
 
-async def mjpeg_generator(camera_id: str):
-    """Async generator that yields MJPEG multipart frames."""
-    while True:
-        worker_frame = stream_manager.get_latest_frame(camera_id)
-        runtime = stream_manager.get_status(camera_id)
-        display_fps = runtime["display_fps"] if runtime else settings.default_display_fps
-
-        try:
-            if worker_frame is not None:
-                jpeg = frame_to_jpeg(worker_frame, quality=settings.mjpeg_jpeg_quality)
-            else:
-                jpeg = get_blank_frame()
-
-            # MJPEG multipart format
-            header = (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n"
-                b"Content-Length: " + str(len(jpeg)).encode() + b"\r\n"
-                b"\r\n"
-            )
-            yield header + jpeg + b"\r\n"
-
-        except Exception as e:
-            logger.error("MJPEG generator error for camera %s: %s", camera_id, e)
-            yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + get_blank_frame() + b"\r\n"
-
-        # Sleep based on display_fps
-        sleep_time = 1.0 / max(display_fps, 1)
-        await asyncio.sleep(sleep_time)
-
-
-@router.get("/{camera_id}/mjpeg")
-async def stream_mjpeg(camera_id: str):
+@router.get("/{camera_id}/hls-info", response_model=HLSInfo)
+async def get_hls_info(camera_id: str):
     """
-    MJPEG streaming endpoint.
-    Use as: <img src="/api/v1/streams/{camera_id}/mjpeg">
+    Get HLS stream URL for a camera.
+    The browser uses this URL to load video via hls.js.
     """
-    return StreamingResponse(
-        mjpeg_generator(camera_id),
-        media_type=CONTENT_TYPE,
+    hls_url = stream_manager.get_hls_url(camera_id)
+    status_data = stream_manager.get_status(camera_id)
+
+    if hls_url is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Camera {camera_id} not found or not registered"
+        )
+
+    cam_status = status_data.get("status", "STOPPED") if status_data else "STOPPED"
+    available = cam_status == "CONNECTED"
+
+    # Extract rtsp_path from hls_url for convenience
+    try:
+        rtsp_path = hls_url.rsplit("/", 2)[-2]
+    except Exception:
+        rtsp_path = ""
+
+    return HLSInfo(
+        camera_id=camera_id,
+        hls_url=hls_url if available else None,
+        rtsp_path=rtsp_path,
+        available=available,
     )

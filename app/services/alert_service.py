@@ -15,7 +15,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.core.constants import EventType, Severity
 from app.core.config import settings
 from app.repositories.stream_event_repository import StreamEventRepository
-from app.services.telegram_notifier import send_telegram_message
+from app.services.telegram_notifier import send_telegram_alert
 from app.services.websocket_manager import ws_manager
 from app.core.constants import WS_STREAM_EVENT
 
@@ -23,6 +23,13 @@ logger = logging.getLogger(__name__)
 
 # Cooldown state: (camera_id, event_type) -> last_notified timestamp
 _cooldown: Dict[Tuple[str, str], datetime] = {}
+_telegram_event_types = {
+    EventType.CAMERA_DISCONNECTED,
+    EventType.CAMERA_RECONNECTED,
+    EventType.HIGH_CPU,
+    EventType.HIGH_MEMORY,
+    EventType.WORKER_ERROR,
+}
 
 
 class AlertService:
@@ -38,6 +45,7 @@ class AlertService:
         metric_name: Optional[str] = None,
         metric_value: Optional[float] = None,
         threshold: Optional[float] = None,
+        bypass_cooldown: bool = False,
     ) -> None:
         """
         Process an event:
@@ -73,19 +81,24 @@ class AlertService:
         cooldown_key = (camera_id, event_type.value)
         last_notified = _cooldown.get(cooldown_key)
         cooldown_passed = (
-            last_notified is None
+            bypass_cooldown
+            or last_notified is None
             or (now - last_notified).total_seconds() > settings.alert_cooldown_seconds
         )
 
         # 3. Send Telegram if enabled
         notified = False
-        if cooldown_passed and settings.telegram_enabled:
-            tg_message = (
-                f"🚨 <b>{severity.value}</b> | {event_type.value}\n"
-                f"Camera: {camera_id}\n"
-                f"Message: {message}"
+        if (
+            event_type in _telegram_event_types
+            and cooldown_passed
+            and settings.telegram_enabled
+        ):
+            notified = await send_telegram_alert(
+                project=settings.alert_project_name,
+                alert_type=f"{severity.value} / {event_type.value}",
+                source=camera_id,
+                detail=message,
             )
-            notified = await send_telegram_message(tg_message)
             if notified:
                 _cooldown[cooldown_key] = now
                 # Update notified flag in DB

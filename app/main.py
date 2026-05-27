@@ -34,6 +34,7 @@ from app.db.indexes import create_indexes
 from app.services.stream_manager import stream_manager
 from app.services.alert_service import init_alert_service
 from app.services.metrics_service import metrics_monitor
+from app.services.telegram_config_service import load_telegram_configuration
 from app.api.v1.router import router as v1_router
 
 setup_logging()
@@ -52,11 +53,13 @@ async def lifespan(app: FastAPI):
     db = get_database()
     await create_indexes(db)
 
+    await load_telegram_configuration(db)
     init_alert_service(db)
     logger.info("AlertService initialized")
 
+    # load_on_startup also starts the MediaMTX status poller (1 task for all cameras)
     await stream_manager.load_on_startup(db)
-    logger.info("StreamManager loaded — %d workers active", stream_manager.active_count)
+    logger.info("StreamManager loaded — %d cameras registered", len(stream_manager._configs))
 
     metrics_monitor.start()
     logger.info("MetricsMonitor started")

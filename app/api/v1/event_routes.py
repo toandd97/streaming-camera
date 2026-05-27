@@ -8,12 +8,13 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.db.mongodb import get_database
 from app.repositories.stream_event_repository import StreamEventRepository
+from app.schemas.stream_event_schema import StreamEventResponse
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/stream-events", tags=["events"])
 
 
-@router.get("", response_model=List[dict])
+@router.get("", response_model=List[StreamEventResponse])
 async def list_stream_events(
     camera_id: Optional[str] = Query(None, description="Filter by camera ID"),
     event_type: Optional[str] = Query(None, description="Filter by event type"),

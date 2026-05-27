@@ -9,8 +9,8 @@
 #   2. Download sample video if not exists
 #   3. Build and start all Docker services
 #   4. Wait for backend to be ready
-#   5. Start 4 RTSP simulation streams via FFmpeg
-#   6. Register 4 demo cameras via API
+#   5. Start the bundled-video RTSP publisher service
+#   6. Register 4 distinct demo cameras via API
 # =============================================================================
 
 set -e
@@ -37,38 +37,31 @@ echo ""
 # Step 1: Prepare .env
 # --------------------------------------------------
 log_info "Step 1: Preparing environment config..."
-if [ ! -f .env ]; then
-    cp .env.example .env
-    log_ok ".env created from .env.example"
-else
-    log_warn ".env already exists, skipping copy"
-fi
+bash scripts/init_env.sh
+log_ok "Environment config prepared"
 
 # --------------------------------------------------
 # Step 2: Check for video file
 # --------------------------------------------------
 log_info "Step 2: Checking for video file..."
 
-# Use existing video/ folder if available
-if [ -d video ] && [ "$(ls -A video/*.mp4 2>/dev/null)" ]; then
-    VIDEO_FILE=$(ls video/*.mp4 | head -1)
-    log_ok "Using existing video: $VIDEO_FILE"
-elif [ -f videos/sample.mp4 ]; then
-    VIDEO_FILE="videos/sample.mp4"
+# Use existing resources/videos folder if available
+if [ -d resources/videos ] && [ "$(ls -A resources/videos/*.mp4 2>/dev/null)" ]; then
+    VIDEO_FILE=$(ls resources/videos/*.mp4 | head -1)
     log_ok "Using existing video: $VIDEO_FILE"
 else
-    mkdir -p videos
+    mkdir -p resources/videos resources/images resources/excel
     log_info "Downloading sample video (Big Buck Bunny ~1MB)..."
     curl -L --progress-bar \
         "https://sample-videos.com/video321/mp4/720/big_buck_bunny_720p_1mb.mp4" \
-        -o videos/sample.mp4 \
+        -o resources/videos/sample.mp4 \
         || {
             log_warn "Primary download failed. Trying backup source..."
             curl -L --progress-bar \
                 "https://www.w3schools.com/html/mov_bbb.mp4" \
-                -o videos/sample.mp4
+                -o resources/videos/sample.mp4
         }
-    VIDEO_FILE="videos/sample.mp4"
+    VIDEO_FILE="resources/videos/sample.mp4"
     log_ok "Sample video downloaded: $VIDEO_FILE"
 fi
 
@@ -88,7 +81,7 @@ TIMEOUT=60
 ELAPSED=0
 until curl -sf http://localhost:8000/api/v1/cameras > /dev/null 2>&1; do
     if [ $ELAPSED -ge $TIMEOUT ]; then
-        log_error "Backend did not start within ${TIMEOUT}s. Check: docker compose logs backend"
+        log_error "Backend did not start within ${TIMEOUT}s. Check: docker compose logs streaming-camera-app"
         exit 1
     fi
     echo -n "."
@@ -101,16 +94,15 @@ log_ok "Backend is ready"
 # --------------------------------------------------
 # Step 5: Start RTSP simulation streams
 # --------------------------------------------------
-log_info "Step 5: Starting 4 RTSP simulation streams..."
-echo "[*] Starting RTSP simulation streams..."
-bash scripts/start_rtsp_streams.sh "$VIDEO_FILE" 4
-log_ok "RTSP streams started"
+log_info "Step 5: Starting local demo RTSP source library..."
+docker compose --profile demo up -d demo-publisher
+log_ok "RTSP demo sources started (one RTSP path per bundled video)"
 sleep 3
 
 # --------------------------------------------------
 # Step 6: Register demo cameras
 # --------------------------------------------------
-log_info "Step 6: Registering 4 demo cameras..."
+log_info "Step 6: Registering 4 cameras with distinct demo videos..."
 bash scripts/register_demo_cameras.sh http://localhost:8000
 log_ok "Demo cameras registered"
 
@@ -127,7 +119,8 @@ echo "  API Docs:   http://localhost:8000/docs"
 echo "  MongoDB:    mongodb://localhost:27017"
 echo ""
 echo "  Useful commands:"
-echo "    Stop streams:   bash scripts/stop_rtsp_streams.sh"
-echo "    View logs:      docker compose logs -f backend"
+echo "    Demo sources:   docker compose --profile demo up -d demo-publisher"
+echo "    Stop sources:   docker compose --profile demo stop demo-publisher"
+echo "    View logs:      docker compose logs -f streaming-camera-app"
 echo "    Stop all:       docker compose down"
 echo ""

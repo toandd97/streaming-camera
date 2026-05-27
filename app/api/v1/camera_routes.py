@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.db.mongodb import get_database
+from app.common.response import MessageResponse
 from app.schemas.camera_schema import CameraCreate, CameraUpdate, CameraResponse, DisplayFpsUpdate
 from app.services.camera_service import CameraService
 
@@ -58,7 +59,7 @@ async def update_camera(
     return await svc.update_camera(camera_id, data)
 
 
-@router.delete("/{camera_id}")
+@router.delete("/{camera_id}", response_model=MessageResponse)
 async def delete_camera(
     camera_id: str,
     svc: CameraService = Depends(get_camera_service),

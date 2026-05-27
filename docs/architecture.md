@@ -2,113 +2,80 @@
 
 ## System Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        ORBRO B1 System                          │
-│                                                                 │
-│  ┌──────────┐    ┌─────────────┐    ┌────────────────────────┐ │
-│  │ sample   │───▶│   FFmpeg    │───▶│     MediaMTX           │ │
-│  │ .mp4     │    │ (loop x N)  │    │  RTSP Server :8554     │ │
-│  └──────────┘    └─────────────┘    └────────────┬───────────┘ │
-│                                                  │ rtsp://     │
-│  ┌───────────────────────────────────────────────▼───────────┐ │
-│  │                   FastAPI Backend :8000                   │ │
-│  │                                                           │ │
-│  │  ┌─────────────┐   ┌──────────────────────────────────┐  │ │
-│  │  │  REST API   │   │          StreamManager           │  │ │
-│  │  │  /api/v1    │   │  Dict[camera_id → StreamWorker]  │  │ │
-│  │  └──────┬──────┘   └──────────────┬───────────────────┘  │ │
-│  │         │                         │ one per camera        │ │
-│  │  ┌──────▼──────┐   ┌──────────────▼───────────────────┐  │ │
-│  │  │  MongoDB    │   │           StreamWorker            │  │ │
-│  │  │  cameras    │   │  - cv2.VideoCapture(rtsp_url)     │  │ │
-│  │  │  events     │   │  - SlidingWindowFPS calculator    │  │ │
-│  │  └─────────────┘   │  - No-frame timeout detection     │  │ │
-│  │                    │  - Auto-reconnect loop            │  │ │
-│  │  ┌─────────────┐   │  - latest_frame: np.ndarray       │  │ │
-│  │  │   MJPEG     │   └──────────────────────────────────┘  │ │
-│  │  │  Endpoint   │◀── frame bytes                          │ │
-│  │  └──────┬──────┘                                         │ │
-│  │         │                   ┌──────────────────────────┐ │ │
-│  │  ┌──────▼──────┐            │     AlertService         │ │ │
-│  │  │   Browser   │            │  - Save to MongoDB       │ │ │
-│  │  │  Dashboard  │◀── WS ────│  - Cooldown tracking     │ │ │
-│  │  └─────────────┘            │  - Telegram (optional)   │ │ │
-│  │                             └──────────────────────────┘ │ │
-│  └───────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────┘
+```text
+resources/videos/*.mp4 -> cached low-bandwidth rendition (prepared once)
+    -> demo-publisher (one FFmpeg loop per source, H.264 stream-copy)
+    -> MediaMTX
+         |-- RTSP input paths: /demo/garden, /demo/office, ...
+         |-- HLS output :8888 -> Browser / hls.js
+         `-- API :9997 -> FastAPI StreamManager poller
+
+FastAPI :8000
+    |-- Camera CRUD API -> MongoDB
+    |-- StreamManager -> one periodic MediaMTX API query for all cameras
+    |-- MetricsService / AlertService / WebSocket updates
+    `-- Static dashboard -> visible tiles load HLS lazily
 ```
 
 ## Data Flow
 
-### 1. Frame Reading Flow
-```
-MediaMTX (RTSP) → cv2.VideoCapture → StreamWorker
-  → latest_frame (numpy array, in memory)
-  → FPS Calculator (sliding window)
-  → RuntimeStatus update (in memory only)
-  → MJPEG endpoint reads latest_frame → JPEG encode → browser
+### Demo Input
+
+`demo-publisher` publishes every H.264 `.mp4` in `resources/videos/` on a stable RTSP path:
+
+```text
+resources/videos/garden.mp4 -> rtsp://mediamtx:8554/demo/garden
+resources/videos/office.mp4 -> rtsp://mediamtx:8554/demo/office
 ```
 
-### 2. Status Update Flow
-```
-StreamWorker (per-camera loop, every frame):
-  → RuntimeStatus.actual_fps, frame_age_ms, uptime_seconds updated
-  → No MongoDB write per frame
+On first startup it creates cached 640x360, 10 FPS, low-bitrate H.264
+renditions. Continuous publication then uses FFmpeg stream-copy (`-c:v copy`)
+rather than keeping an encoder per channel. Camera CRUD remains independent:
+an added camera stores one of these RTSP URLs, or any external RTSP URL.
 
-StreamManager.get_all_statuses():
-  → Called by GET /api/v1/cameras (REST poll)
-  → Called by WS /api/v1/ws/dashboard (push every 1s)
-  → Returns merged config (MongoDB) + runtime (memory)
+### Browser Playback
+
+```text
+MediaMTX RTSP path -> MediaMTX HLS muxer -> /<path>/index.m3u8 -> hls.js video
 ```
 
-### 3. Failure/Reconnect Flow
+FastAPI is not on the video data path. The frontend only opens HLS playback for
+visible camera tiles, avoiding dozens of concurrent players on a dashboard page.
+
+### Status And Reconnect
+
+```text
+StreamManager -> GET MediaMTX /v3/paths/list every 5 seconds
+    ready source exists -> CONNECTED, update uptime
+    source disappears -> DISCONNECTED -> RECONNECTING, emit event
+    source returns -> CONNECTED, emit event
 ```
-Frame NOT received for > NO_FRAME_TIMEOUT_SECONDS (5s):
-  status → DISCONNECTED
-  → AlertService.emit(CAMERA_DISCONNECTED, CRITICAL)
-    → StreamEventRepository.create() → MongoDB
-    → WebSocketManager.broadcast() → browser toast
-    → TelegramNotifier.send() (if enabled)
-  status → RECONNECTING
-  → sleep(RECONNECT_INTERVAL_SECONDS)
-  → cv2.VideoCapture(rtsp_url) again
-  → If connected: status → CONNECTED, emit CAMERA_RECONNECTED
-```
+
+This detects a stopped publisher or broken RTSP source. It does not yet inspect
+decoded frames or calculate actual FPS/latency; those fields should not be used
+as measurement results until a frame/telemetry probe is added.
+
+## Scale Considerations
+
+- Backend work is one MediaMTX status poll plus metadata APIs, not one OpenCV
+  decoder per camera.
+- Demo publishers continuously stream-copy cached low-bitrate inputs; one-time
+  cache preparation avoids the original files' excessive bandwidth.
+- MediaMTX performs HLS packaging; browser load is limited through lazy tile
+  playback.
+- The requirement targets 32 channels. Operation at 80 channels is an analysis
+  and benchmark scenario, not a claim without measurements on the deployment
+  hardware.
+- Bottlenecks to measure are publisher and HLS I/O, MediaMTX memory, aggregate
+  bandwidth, and the number of simultaneously visible browser players.
 
 ## Module Responsibilities
 
 | Module | Responsibility |
-|--------|---------------|
-| `main.py` | App factory, lifespan, routing, static files |
-| `core/config.py` | pydantic-settings, single source of truth |
-| `core/logging.py` | dictConfig, per-module loggers |
-| `core/constants.py` | Enums (CameraStatus, EventType, Severity) |
-| `db/mongodb.py` | Motor client, connect/disconnect lifecycle |
-| `db/indexes.py` | Create MongoDB indexes on startup |
-| `models/` | MongoDB documents + RuntimeStatus dataclass |
-| `schemas/` | Pydantic request/response validation |
-| `repositories/` | Raw MongoDB CRUD (no business logic) |
-| `services/stream_worker.py` | RTSP read loop, FPS, timeout, reconnect |
-| `services/stream_manager.py` | Dict of workers, aggregate status, startup load |
-| `services/camera_service.py` | Business logic, merge config+runtime |
-| `services/alert_service.py` | Event persistence, cooldown, Telegram |
-| `services/metrics_service.py` | psutil/pynvml, background threshold monitor |
-| `services/websocket_manager.py` | WS connection set, broadcast |
-| `api/v1/` | Route handlers per feature area |
-| `utils/` | FPS calculator, time helpers, JPEG encoder |
-| `web/` | Dashboard HTML/CSS/JS |
-
-## Design Decisions
-
-### Memory-first Runtime Status
-Runtime data (FPS, frame_age, reconnect_count) is kept in `StreamWorker` memory, not written to MongoDB per frame. This avoids MongoDB write amplification and allows high-frequency updates without DB overhead.
-
-### Asyncio + Executor for OpenCV
-`cv2.VideoCapture.read()` is blocking. We use `loop.run_in_executor(None, cap.read)` to avoid blocking the event loop. The MJPEG generator and WebSocket broadcaster continue serving other clients while a frame is being decoded.
-
-### API Versioning
-All routes under `/api/v1/`. Adding v2 means creating `app/api/v2/` and mounting it in `main.py` — v1 is never modified.
-
-### MJPEG vs WebRTC
-MJPEG chosen for simplicity (no signaling, no STUN/TURN, works in any browser with `<img>`). For production, WebRTC or LL-HLS is recommended for lower latency and better scalability.
+|--------|----------------|
+| `scripts/publish_demo_library.sh` | Reproducible distinct RTSP demo sources |
+| `mediamtx.yml` | RTSP reception, HLS delivery, status API |
+| `services/stream_manager.py` | Runtime state derived from MediaMTX paths |
+| `services/camera_service.py` | Camera CRUD and runtime merge |
+| `web/app.js` | HLS playback, lazy tile loading, register/edit UI |
+| `metrics_service.py` | CPU/RAM/GPU host metrics |

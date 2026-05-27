@@ -5,10 +5,48 @@ Sends alert messages to a Telegram chat via Bot API.
 Must fail safely: any exception is logged but NOT propagated.
 """
 import logging
+from html import escape
+
 import httpx
+
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def format_telegram_alert(
+    *,
+    project: str,
+    alert_type: str,
+    detail: str,
+    source: str,
+) -> str:
+    """Create a common Telegram alert format that identifies the source app."""
+    return (
+        "<b>ALERT</b>\n"
+        f"<b>Project:</b> {escape(project)}\n"
+        f"<b>Type:</b> {escape(alert_type)}\n"
+        f"<b>Source:</b> {escape(source)}\n"
+        f"<b>Detail:</b> {escape(detail)}"
+    )
+
+
+async def send_telegram_alert(
+    *,
+    project: str,
+    alert_type: str,
+    detail: str,
+    source: str,
+) -> bool:
+    """Send a structured alert shared by camera and system notifications."""
+    return await send_telegram_message(
+        format_telegram_alert(
+            project=project,
+            alert_type=alert_type,
+            detail=detail,
+            source=source,
+        )
+    )
 
 
 async def send_telegram_message(message: str) -> bool:
@@ -24,9 +62,18 @@ async def send_telegram_message(message: str) -> bool:
         logger.warning("Telegram enabled but credentials not configured")
         return False
 
-    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+    return await send_telegram_message_to(
+        bot_token=settings.telegram_bot_token,
+        chat_id=settings.telegram_chat_id,
+        message=message,
+    )
+
+
+async def send_telegram_message_to(*, bot_token: str, chat_id: str, message: str) -> bool:
+    """Send using supplied credentials, including before alerts are enabled."""
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     payload = {
-        "chat_id": settings.telegram_chat_id,
+        "chat_id": chat_id,
         "text": message,
         "parse_mode": "HTML",
     }
